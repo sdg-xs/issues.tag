@@ -1,0 +1,21 @@
+[package]
+version = "0.1.0"
+title = "Issues"
+description = "Project issue review, surface pins, viewpoints, and BCF file exchange."
+category = "Viewport"
+keywords = ["issues", "BCF", "BIM", "review"]
+
+[dependencies]
+"omni.ui" = {}
+"omni.usd" = {}
+"omni.kit.commands" = {}
+"omni.kit.usd_undo" = {}
+"omni.kit.menu.utils" = {}
+"omni.kit.viewport.utility" = {}
+"omni.kit.viewport.window" = {}
+
+[[python.module]]
+name = "issues_tag"
+
+[settings]
+persistent.exts."issues.tag".authorName = "Reviewer"
