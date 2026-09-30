@@ -27,7 +27,7 @@ def reference_for_prim(stage, path):
     while parent and not parent.IsPseudoRoot():
         refs = parent.GetMetadata("references")
         if refs:
-            items = refs.GetAddedOrExplicitItems()
+            items = [item for item in refs.GetAddedOrExplicitItems() if item.assetPath]
             if items:
                 instance_path = str(parent.GetPath())
                 model_id = Sdf.ComputeAssetPathRelativeToLayer(stage.GetRootLayer(), items[0].assetPath)

@@ -181,3 +181,52 @@ async def preview_issue_pins(service):
         assert path.exists() and path.read_bytes().startswith(b'\x89PNG\r\n\x1a\n')
     finally:
         adapter.destroy()
+
+async def preview_native_gesture_placement(service):
+    """Visible acceptance: a native mouse event must complete surface placement."""
+    import asyncio
+    import omni.kit.app
+    from omni.kit.viewport.utility import create_viewport_window, next_viewport_frame_async
+    from issues_tag.viewport import ViewportAdapter
+    from verify_kit import frames
+
+    manager = omni.kit.app.get_app().get_extension_manager()
+    manager.set_extension_enabled_immediate('omni.kit.ui_test', True)
+    from omni.kit.ui_test import Vec2, emulate_mouse_move_and_click
+
+    stage = service.stage
+    camera = UsdGeom.Camera.Define(stage, '/NativeGestureCamera')
+    camera.AddTranslateOp().Set(Gf.Vec3d(0, 0, 10))
+    camera.GetFocalLengthAttr().Set(35)
+    UsdGeom.Cube.Define(stage, '/NativeGestureCube')
+    UsdGeom.Cube.Define(stage, '/SelectionBeforePlacement').AddTranslateOp().Set(Gf.Vec3d(5, 0, 0))
+    selection = service._context.get_selection()
+    selection.set_selected_prim_paths(['/SelectionBeforePlacement'], False)
+    before = tuple(selection.get_selected_prim_paths())
+    window = create_viewport_window('Native issue placement regression', width=640, height=480,
+                                    position_x=20, position_y=20, camera_path=camera.GetPath())
+    assert window and window.visible
+    adapter = ViewportAdapter(service, window.viewport_api)
+    try:
+        adapter.start()
+        await frames(30)
+        await asyncio.wait_for(next_viewport_frame_async(window.viewport_api, 1), 15)
+        pending = adapter.begin_placement()
+        await frames(5)
+        frame = window.frame
+        center = Vec2(float(frame.screen_position_x) + float(frame.computed_width) / 2,
+                      float(frame.screen_position_y) + float(frame.computed_height) / 2)
+        print('NATIVE_GESTURE_CLICK', center, flush=True)
+        # This passes through the app's input provider and native scene gestures.
+        # It deliberately never calls _place_at() or the raycast adapter directly.
+        await asyncio.wait_for(emulate_mouse_move_and_click(center), 15)
+        anchor = await asyncio.wait_for(pending, 15)
+        assert anchor and anchor.element.prim_path == '/NativeGestureCube', 'Native click did not complete surface placement'
+        assert abs(anchor.local_position[2] - 1) < .05
+        issue_id = service.create_issue('Native viewport click issue', anchor)
+        assert service.get_issue(issue_id).anchor == anchor
+        assert tuple(selection.get_selected_prim_paths()) == before, 'Placement click changed ordinary model selection'
+    finally:
+        adapter.destroy()
+        window.destroy()
+        await frames(5)

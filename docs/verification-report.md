@@ -63,6 +63,10 @@ The adapter now awaits the public Markup creation callback and a delivered viewp
 
 ## Open acceptance gates
 
+Live pin acceptance on 2026-09-30: the lead used the user's open SOL11-23 scene and created one `New issue` on the rooftop chiller through Place pin and a native surface click. The viewport displayed a turquoise pin and the panel showed one open record. The issue survived extension reload; the scene was left unsaved. This exposed an internal USD reference with an empty asset path. Reference identity now skips that internal arc when finding the enclosing external building reference. Five isolated anchor tests passed, including the new regression. A separate visible native mouse test also passed, proving gesture-to-surface-anchor completion without directly invoking the pick handler. Independent review found no Critical or Important defect in this focused change.
+
+Composer temporarily stopped responding for roughly 70 seconds during this live attempt, then recovered without a restart. A read-only native stack sample is retained locally at `verification/live-pin-hang-stack.txt`. The cause of that pause is not established, and this acceptance does not claim large-model responsiveness.
+
 - Select a BCF partner and perform an actual exchange. Schema validation and internal round trips do not establish external interoperability.
 - Validate identifiers and geometry revisions on a representative building. Synthetic repeated references do not establish production metadata correctness or all native USD instance-proxy cases.
 - Inspect clipping visually on a representative building. The live Section Box control and RTX-plane synchronization gate is now verified.

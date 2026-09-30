@@ -66,3 +66,25 @@ def test_reference_identity_rejects_different_source_model(service):
     anchor = make_anchor(service.stage, '/A/Cube', (0, 0, 1))
     other_model = replace(anchor.element, model_id=anchor.element.model_id + '.different')
     assert resolve_element(service.stage, other_model).state == 'missing', 'Same instance and element ID must not match a different source model'
+
+
+def test_internal_geometry_reference_keeps_external_building_scope(service):
+    from pxr import Usd
+    from verify_kit import ROOT
+    from issues_tag.elements import make_anchor, resolve_element, world_anchor
+    source = Usd.Stage.CreateInMemory()
+    model = UsdGeom.Xform.Define(source, '/Model')
+    library = UsdGeom.Cube.Define(source, '/Geometry/Equipment').GetPrim()
+    library.CreateAttribute('ifc:GlobalId', Sdf.ValueTypeNames.String).Set('internal-equipment')
+    equipment = source.DefinePrim('/Model/Equipment')
+    equipment.GetReferences().AddInternalReference('/Geometry/Equipment')
+    source.SetDefaultPrim(model.GetPrim())
+    path = ROOT / 'verification' / 'internal-reference-building.usda'
+    source.GetRootLayer().Export(str(path))
+    for name in ('A', 'B'):
+        service.stage.DefinePrim('/' + name).GetReferences().AddReference(str(path))
+    anchor = make_anchor(service.stage, '/A/Equipment', (0, 0, 1))
+    assert anchor.element.instance_path == '/A'
+    assert anchor.element.model_id == str(path).replace('\\', '/')
+    assert resolve_element(service.stage, anchor.element).prim_path == '/A/Equipment'
+    assert world_anchor(service.stage, anchor) == (0, 0, 1)
