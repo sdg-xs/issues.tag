@@ -27,7 +27,7 @@ The runner launches a separate Kit process with temporary scenes. It does not op
 ./run-verify-kit.ps1 -Case all -Visible
 ```
 
-Use `-KitRoot` for another SDK location. Individual cases are `runtime`, `persistence`, `ui`, `anchors`, `viewpoints`, `markup`, `bcf`, and `workflow`. Markup and screenshot verification require a visible window. The runner returns nonzero on failure and writes `verification/results.json`, logs, generated USD/BCF files, and PNG evidence. Run only one verification process at a time.
+Use `-KitRoot` for another SDK location. Individual cases are `runtime`, `persistence`, `ui`, `anchors`, `viewpoints`, `markup`, `section_box`, `bcf`, and `workflow`. The complete integration suite expects the installed `section.box` 1.1.0 extension in the shared parent folder. Markup and screenshot verification require a visible window. The runner returns nonzero on failure and writes `verification/results.json`, logs, generated USD/BCF files, and PNG evidence. Run only one verification process at a time.
 
 ## Current boundaries
 
@@ -35,4 +35,4 @@ One editor at a time; configurable author names are attribution, not authenticat
 
 Synthetic fixtures verify IFC GlobalId and Revit UniqueId matching within each referenced model instance. Production metadata still needs a representative building and revision. Path-only attachments provide same-scene identity; unverified HOOPS asset GUIDs are not treated as unique element IDs. Changed local geometry, missing IDs, and ambiguous matches require review or reattachment. No model-size or performance guarantee has been measured.
 
-The installed Markup tool uses the primary `Viewport` window for evidence capture. Additional viewport layouts and live Section Box controls need acceptance testing. See [the verification record](docs/verification-report.md) for the complete test results, independent review fixes, crash investigation, and open gates.
+Markup capture and annotation require the visible primary `Viewport` window. The adapter rejects secondary viewport requests before creating evidence. Ordinary saved review cameras remain scoped to their viewport. Live Section Box tests verify restored controls, clipping toggles, and active viewport ownership. See [the verification record](docs/verification-report.md) for complete test results and open gates, and [Markup lifecycle](docs/markup-lifecycle.md) for cancellation and edit-target behavior.

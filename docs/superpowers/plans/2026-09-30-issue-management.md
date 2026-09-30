@@ -10,7 +10,7 @@
 
 **Spec:** [Omniverse issue management specification](../../../SPEC.md)
 
-**Execution checkpoint, 2026-09-30:** The user approved development and parallel workers. Tasks 1–6 are implemented; Task 7's internal workflow and delivery checks pass. The final visible Kit run reports 43 passing outcomes with process exit zero. External BCF interoperability, representative production identity, live Section Box controls, and broader viewport layouts remain open acceptance gates. See [the verification record](../../verification-report.md) for evidence, review fixes, decisions, and limits. The original task checklist below is retained as the approved plan rather than treated as proof that every acceptance gate has closed.
+**Execution checkpoint, 2026-09-30:** The user approved development and parallel workers. Tasks 1–6 are implemented; Task 7's internal workflow and delivery checks pass. The follow-up visible Kit run reports 57 passing outcomes with process exit zero. Live Section Box controls and Markup lifecycle cleanup now have runtime coverage. External BCF interoperability and representative production identity remain open acceptance gates. Markup annotation requires the primary viewport. See [the verification record](../../verification-report.md) for evidence, review fixes, decisions, and limits. The original task checklist below is retained as the approved plan rather than treated as proof that every acceptance gate has closed.
 
 ## Global Constraints
 

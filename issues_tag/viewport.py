@@ -80,7 +80,7 @@ class ViewportAdapter:
         try:
             import section_box
             state = section_box.get_runtime_state()
-            if state and state.stage == stage:
+            if state and state.stage == stage and vp_util.get_active_viewport(usd_context_name=None) == viewport:
                 section = {'enabled': state.enabled, 'transform': list(flatten(state.box.transform)),
                            'size': list(state.box.size), 'faces': [f.name for f in state.box.faces]}
         except ImportError:
@@ -99,6 +99,19 @@ class ViewportAdapter:
         required = {'projection', 'transform', 'horizontal_aperture', 'vertical_aperture', 'focal_length', 'clipping_range'}
         if not required.issubset(record.camera):
             raise ValueError('This issue has no usable saved camera.')
+        section = None
+        box = None
+        try:
+            import section_box
+            from section_box.model import SectionBox, Face
+            state = section_box.get_runtime_state()
+            if state and state.stage == stage and vp_util.get_active_viewport(usd_context_name=None) == viewport:
+                section = state
+                if record.section_state:
+                    values = record.section_state
+                    box = SectionBox(matrix(values['transform']), Gf.Vec3d(*values['size']), frozenset(Face[n] for n in values['faces']))
+        except ImportError:
+            pass
         path = '/IssuesReviewCamera_' + str(id(viewport))
         with Usd.EditContext(stage, stage.GetSessionLayer()):
             camera = UsdGeom.Camera.Define(stage, path)
@@ -112,23 +125,20 @@ class ViewportAdapter:
                 prim = stage.GetPrimAtPath(prim_path)
                 if prim and prim.IsA(UsdGeom.Imageable):
                     UsdGeom.Imageable(prim).GetVisibilityAttr().Set(visible)
-            render = stage.GetPrimAtPath(viewport.render_product_path)
-            if render:
-                render.CreateAttribute(ENABLED, Sdf.ValueTypeNames.Bool).Set(bool(record.clipping_planes))
-                render.CreateAttribute(PLANES, Sdf.ValueTypeNames.FloatArray).Set([v for p in record.clipping_planes for v in p] or [0,0,0,0])
         viewport.camera_path = path
         selected = [resolve_element(stage, ref) for ref in record.selection]
         self.service._context.get_selection().set_selected_prim_paths([r.prim_path for r in selected if r.state == 'resolved'], False)
-        if record.section_state:
-            try:
-                import section_box
-                from section_box.model import SectionBox, Face
-                state = section_box.get_runtime_state()
-                if state and state.stage == stage:
-                    values = record.section_state
-                    state.edit(box=SectionBox(matrix(values['transform']), Gf.Vec3d(*values['size']), frozenset(Face[n] for n in values['faces'])), enabled=values['enabled'])
-            except ImportError:
-                pass
+        if section:
+            if box:
+                section.edit(box=box, enabled=record.section_state['enabled'])
+            else:
+                section.edit(enabled=False)
+        if not (section and box and record.section_state['enabled'] and box.faces):
+            with Usd.EditContext(stage, stage.GetSessionLayer()):
+                render = stage.GetPrimAtPath(viewport.render_product_path)
+                if render:
+                    render.CreateAttribute(ENABLED, Sdf.ValueTypeNames.Bool).Set(bool(record.clipping_planes))
+                    render.CreateAttribute(PLANES, Sdf.ValueTypeNames.FloatArray).Set([v for p in record.clipping_planes for v in p] or [0,0,0,0])
 
     def focus(self, refs):
         paths = [resolve_element(self.service.stage, ref) for ref in refs]

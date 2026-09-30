@@ -1,0 +1,15 @@
+# Section Box acceptance verification
+
+The Issues adapter integrates with the installed **section.box 1.1.0** extension through `section_box.get_runtime_state()`, `SectionBoxState.edit()`, and the public `SectionBox` and `Face` models. The integration is optional in the product; this acceptance case explicitly enables it and fails if it cannot activate.
+
+Run `run-verify-kit.ps1 -Case section_box -Visible`. The extension search path must include the shared parent folder containing both `issues.tag` and `section.box`. The existing runner already registers that folder. No product dependency or neighboring extension edit is required. Section Box's own manifest declares `omni.kit.widget.toolbar`, `omni.kit.viewport.registry`, `omni.ui.scene`, USD, commands, undo, viewport utility/window, and pip archive dependencies; the Kit extension manager resolves these when enabling `section.box`.
+
+The acceptance test uses the real active Kit viewport and a scene supplied by the existing service fixture. It enables a translated, rotated Section Box with three active faces, checks the actual RTX render-product clipping coefficients, captures the issue viewpoint, and checks its USD serialization. It then changes the box and disables clipping before opening the issue. The assertions verify that the public controls, face membership, transform, size, enabled state, and render-product planes all return to the saved values. Numeric comparisons use the plan's `1e-6` tolerance. The initial saved record must remain unchanged. A final disable action must also clear clipping, so restored controls continue to govern the rendered cut.
+
+Cleanup restores the previous public Section Box state and original issue viewport adapter. If the test enabled Section Box, it also disables it afterward. This prevents the acceptance case from leaving a controller that overrides later viewport tests.
+
+The lead ran all three cases in the installed Kit runtime. Each passed. This establishes runtime state and clipping synchronization; visual clipping evidence on a representative building remains a separate verification activity.
+
+Two additional regression cases cover controller ownership. An issue captured before Section Box activation must disable a later active controller when opened and recover its original planes. A separate inactive viewport sharing the same stage must not capture the active viewport's Section Box controls. These tests select the inactive viewport from the actual runtime active viewport rather than assuming creation transfers focus. Each restores extension state and destroys its temporary viewport.
+
+Each new case exposed a failing behavior before its fix. Restoring native Section Box state now lets its controller own clipping rather than recording preauthored review planes as the state to restore on disable. A review without native Section Box state first disables the applicable controller, then restores its saved planes. Capture and restore both check viewport ownership so another viewport's public box state cannot be applied accidentally.
