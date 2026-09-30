@@ -13,6 +13,7 @@ import omni.kit.app
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tests"))
+sys.path.insert(0, str(ROOT / 'verification' / 'python'))
 APP = omni.kit.app.get_app()
 
 
@@ -24,6 +25,7 @@ async def frames(count=5):
 async def run():
     await frames(40)
     case = carb.settings.get_settings().get("/exts/issues.tag/verificationCase") or "all"
+    test_name = carb.settings.get_settings().get('/exts/issues.tag/verificationTestName') or ''
     results = []
     files = sorted((ROOT / "tests").glob("test_*.py"))
     if case != "all":
@@ -35,11 +37,19 @@ async def run():
             spec = importlib.util.spec_from_file_location(path.stem, path)
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)
-            for name, function in vars(module).items():
-                if not name.startswith("test_") or not inspect.isfunction(function):
+            for name, function in list(vars(module).items()):
+                selected = name.startswith("test_") or (name.startswith("preview_") and carb.settings.get_settings().get('/exts/issues.tag/verificationVisible'))
+                if not selected or not inspect.isfunction(function):
                     continue
+                if test_name and name != test_name:
+                    continue
+                print('ISSUES_TEST_START', name, flush=True)
                 try:
-                    value = function()
+                    arguments = {}
+                    if "service" in inspect.signature(function).parameters:
+                        from test_persistence import service_for_new_scene
+                        arguments["service"] = await service_for_new_scene()
+                    value = function(**arguments)
                     if inspect.isawaitable(value):
                         await value
                     results.append({"name": name, "state": "PASS"})

@@ -1,5 +1,6 @@
 param(
     [string]$Case = 'all',
+    [string]$TestName = '',
     [string]$KitRoot = 'C:\kit-app-template\_build\windows-x86_64\release\kit',
     [switch]$Visible
 )
@@ -14,6 +15,8 @@ $kitArgs = @(
     '--ext-folder', (Split-Path $PSScriptRoot -Parent),
     '--exec', (Join-Path $PSScriptRoot 'tests\verify_kit.py'),
     "--/exts/issues.tag/verificationCase=$Case",
+    "--/exts/issues.tag/verificationTestName=$TestName",
+    "--/exts/issues.tag/verificationVisible=$($Visible.IsPresent.ToString().ToLower())",
     "--/log/file=$outputPath/kit.log",
     "--/app/userConfigPath=$outputPath/user.config.json",
     "--/app/cachePath=$outputPath/cache",

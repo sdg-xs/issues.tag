@@ -167,7 +167,7 @@ The milestone must demonstrate these outcomes in the target Kit application:
 | Continue as another reviewer | Saved issues can be read, commented on, and updated by the next editor without assignment or role restrictions. |
 | Edit without saving | Unsaved state is visible and the scene is not automatically saved. |
 
-Viewpoint comparisons require defined tolerances for camera, clipping, and coordinate conversion. Those tolerances and the representative model fixtures remain to be selected. External compatibility testing remains pending until a BCF version and partner application are chosen.
+Integration tests use a numeric tolerance of 1e-6 for native camera and clipping comparisons and generated repeated-reference model fixtures. The implemented file profile is BCF XML 3.0. External compatibility testing remains pending until a partner application is chosen; representative production models and revisions still need validation.
 
 No performance limits or model-size targets have been agreed. Technical planning must establish them before treating them as measured capabilities.
 
@@ -187,7 +187,7 @@ No performance limits or model-size targets have been agreed. Technical planning
 
 The product scope above comes from the confirmed design interview. The first milestone is complete when the acceptance workflows pass in the target application and the agreed BCF exchange subset is validated. Choosing the external BCF partner later must not be mistaken for completed interoperability validation.
 
-Local inspection found Markup Core 1.3.1 and Markup Tool 1.2.82 packages targeting Kit 107.3. Neighboring project tooling documents Kit 110.2 and USD Composer. The actual target application and compatibility of those packages remain unverified.
+The implementation has been exercised in the installed Kit 110.2.0 runtime with Python 3.12.13 and OpenUSD 0.25.11. Markup Core 1.3.1 and Markup Tool 1.2.82 target Kit 107.3 in their manifests; activation and editable evidence persistence have passed local Kit 110.2 integration tests. Compatibility with other applications or SDK versions is not established.
 
 A neighboring model browser exposes an Asset ID GUID field, but its uniqueness and stability at the element level are unverified. A representative parent scene and model revision must establish the usable source identity and coordinate mapping before attachment behavior is claimed complete.
 
@@ -195,9 +195,9 @@ Technical validation must establish the target Kit version, Markup public API co
 
 ### Delivery and review
 
-The suggested delivery order is persistent issue records, surface pins and model references, viewpoint restoration and Markup evidence, then BCF exchange and the complete acceptance workflow. This order is a planning recommendation, not an approved implementation plan.
+The approved Superpowers implementation plan follows persistent issue records, surface pins and model references, viewpoint restoration and Markup evidence, then BCF exchange and the complete acceptance workflow. UI, persistence/BCF, and viewport workers own separate files; the lead owns integration and all Kit verification runs.
 
-Review this specification and its proposed application-level testing boundary before development. Once accepted, use Superpowers to validate prerequisites, prepare the implementation plan, and develop against the agreed acceptance behavior.
+The specification and implementation plan were accepted before development. Runtime evidence, internal BCF/schema validation, and independent review are recorded with the implementation. External BCF exchange, production source identity, and performance acceptance remain separate open validation items.
 
 ### Reuse constraints and references
 

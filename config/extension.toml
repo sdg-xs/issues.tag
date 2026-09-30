@@ -13,6 +13,10 @@ keywords = ["issues", "BCF", "BIM", "review"]
 "omni.kit.menu.utils" = {}
 "omni.kit.viewport.utility" = {}
 "omni.kit.viewport.window" = {}
+"omni.kit.viewport.registry" = {}
+"omni.kit.window.filepicker" = {}
+"omni.kit.renderer.capture" = {}
+"omni.kit.pip_archive" = {}
 
 [[python.module]]
 name = "issues_tag"
