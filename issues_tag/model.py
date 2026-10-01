@@ -64,3 +64,6 @@ class IssueRecord:
     comments: tuple[CommentRecord, ...] = ()
     bcf_topic_id: str = ""
     import_baseline: dict = field(default_factory=dict)
+    title: str = ""
+    issue_type: str = "Default"
+    number: int = 0

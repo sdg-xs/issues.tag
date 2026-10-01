@@ -9,7 +9,7 @@ import omni.usd
 from pxr import Tf, Usd
 
 from .commands import UpdateIssuesCommand
-from .model import CommentRecord, IssueRecord, Status
+from .model import CommentRecord, Status
 from .store import IssueStore
 
 
@@ -21,6 +21,7 @@ class IssueService:
         self._mutating = False
         self.generation = 0
         self.viewport = None
+        self.native_view_recaller = None
         self._stage_events = self._context.get_stage_event_stream().create_subscription_to_pop(self._stage_changed)
         self._bind_notice()
 
@@ -89,7 +90,10 @@ class IssueService:
         self.store.require_writable()
         self._mutating = True
         try:
-            success, result = omni.kit.commands.execute("UpdateIssuesCommand", stage=self.stage, operation=operation)
+            def migrated_operation():
+                self.store.migrate()
+                return operation()
+            success, result = omni.kit.commands.execute("UpdateIssuesCommand", stage=self.stage, operation=migrated_operation)
         finally:
             self._mutating = False
         if not success:
@@ -104,19 +108,12 @@ class IssueService:
     def get_issue(self, issue_id):
         return self.store.get_issue(issue_id)
 
-    def create_issue(self, description, anchor=None, viewpoint=None):
-        text = self._text(description)
-        self.store.require_writable()
-        now = self._now()
-        record = IssueRecord(str(uuid4()), text, Status.OPEN, self.author_name, now, now, self.author_name,
-                             anchor=anchor, related_elements=(anchor.element,) if anchor else (),
-                             initial_viewpoint_id=viewpoint.id if viewpoint else "")
-        def operation():
-            self.store.put_issue(record)
-            if viewpoint:
-                self.store.put_viewpoint(viewpoint, record.id)
-        self.mutate(operation)
-        return record.id
+    def create_issue(self, description, anchor=None, viewpoint=None, *, title=None, issue_type="Default"):
+        from .edit_session import IssueEditSession
+        session = IssueEditSession.create(self, anchor, issue_type, viewpoint)
+        session.update(title=title if title is not None else description.splitlines()[0] if description else "",
+                       description=description)
+        return self.commit_session(session)
 
     def _update(self, issue_id, **values):
         current = self.get_issue(issue_id)
@@ -124,7 +121,43 @@ class IssueService:
         self.mutate(lambda: self.store.put_issue(record))
 
     def set_description(self, issue_id, text):
-        self._update(issue_id, description=self._text(text))
+        self._update(issue_id, description=text.strip())
+
+    def list_types(self):
+        return self.store.list_types()
+
+    def create_type(self, name):
+        return self.mutate(lambda: self.store.add_type(name))
+
+    def commit_session(self, session):
+        session.require_current(self)
+        title = session.record.title.strip()
+        if not title or len(title) > 255:
+            raise ValueError("Enter an issue title of 1 to 255 characters.")
+        if session.record.issue_type not in self.list_types():
+            raise ValueError("Select a project issue type.")
+        if session.comment_viewpoint is not None and not session.comment_text.strip():
+            raise ValueError('Enter comment text before saving its evidence.')
+        now = self._now()
+        record = replace(session.record, title=title, description=session.record.description.strip(),
+                         modified_at=now, modified_by=self.author_name,
+                         number=self.store.next_number() if session.is_new else session.original.number,
+                         initial_viewpoint_id=session.viewpoint.id if session.viewpoint else session.record.initial_viewpoint_id)
+        if session.comment_text.strip():
+            comment = CommentRecord(str(uuid4()), session.comment_text.strip(), self.author_name, now,
+                                    session.comment_viewpoint.id if session.comment_viewpoint else "")
+            record = replace(record, comments=record.comments + (comment,))
+        def operation():
+            self.store.put_issue(record)
+            if session.viewpoint is not None and session.viewpoint != session.original_viewpoint:
+                self.store.put_viewpoint(session.viewpoint, record.id)
+            for comment_id, viewpoint in session.comment_viewpoints.items():
+                if viewpoint != session.original_comment_viewpoints.get(comment_id):
+                    self.store.put_viewpoint(viewpoint, record.id)
+            if session.comment_viewpoint is not None:
+                self.store.put_viewpoint(session.comment_viewpoint, record.id)
+        self.mutate(operation)
+        return record.id
 
     def set_status(self, issue_id, status):
         self._update(issue_id, status=Status(status))
@@ -149,7 +182,15 @@ class IssueService:
     def open_issue(self, issue_id):
         record = self.get_issue(issue_id)
         if record.initial_viewpoint_id and self.viewport:
-            self.viewport.restore(self.store.get_viewpoint(record.initial_viewpoint_id))
+            self.restore_viewpoint(self.store.get_viewpoint(record.initial_viewpoint_id))
+
+    def restore_viewpoint(self, record):
+        if not self.viewport:
+            raise ValueError('The saved view needs a viewport in the current scene.')
+        if self.native_view_recaller and self.native_view_recaller(record):
+            return True
+        self.viewport.restore(record)
+        return False
 
     def focus_related(self, issue_id):
         record = self.get_issue(issue_id)
@@ -157,9 +198,20 @@ class IssueService:
             self.viewport.focus(record.related_elements)
 
     def destroy(self):
-        if self._notice:
-            self._notice.Revoke()
-        self._notice = None
+        errors = []
+        notice, self._notice = self._notice, None
+        try:
+            if notice:
+                notice.Revoke()
+        except Exception as error:
+            errors.append(error)
         self._stage_events = None
-        self._listeners.clear()
+        listeners, self._listeners = self._listeners, []
+        try:
+            listeners.clear()
+        except Exception as error:
+            errors.append(error)
+        self.native_view_recaller = None
         self._context = None
+        if errors:
+            raise ExceptionGroup('Issue service cleanup failed', errors)

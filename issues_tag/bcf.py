@@ -1,11 +1,12 @@
-"""BCF 3.0 exchange with previewed, undoable topic merging."""
+"""BCF 2.1/3.0 import and 3.0 export with previewed topic merging."""
+import io
 import json
 import math
 import os
 import re
 import tempfile
 from dataclasses import asdict, dataclass, replace
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from uuid import UUID
 from zipfile import BadZipFile, ZipFile, ZIP_DEFLATED
@@ -19,6 +20,7 @@ class BcfDocument:
     issues: tuple[IssueRecord, ...]
     viewpoints: tuple[ViewpointRecord, ...]
     warnings: tuple[str, ...] = ()
+    native_viewpoints: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -37,6 +39,7 @@ class ImportPlan:
     conflicts: tuple[Conflict, ...]
     stage: object
     expected_records: tuple[IssueRecord, ...]
+    frame_signature: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -69,6 +72,29 @@ def _date(value):
     except ValueError:
         raise ValueError("BCF timestamps require a timezone.") from None
     return value
+
+
+def _import_date(value, legacy, warnings):
+    if legacy:
+        try:
+            parsed = datetime.fromisoformat(value.replace('Z', '+00:00'))
+        except ValueError:
+            return _date(value)
+        if parsed.tzinfo is None:
+            warnings.append('BCF 2.1 timestamps without a timezone were interpreted as UTC; the source timezone is unknown.')
+            value = parsed.replace(tzinfo=timezone.utc).isoformat()
+    return _date(value)
+
+
+def _import_status(value, legacy):
+    if legacy:
+        for status in Status:
+            if (value or '').strip().casefold() == status.value.casefold():
+                return status
+    try:
+        return Status(value)
+    except ValueError:
+        raise ValueError('BCF topic has an unsupported status.') from None
 
 
 def _xml(payload):
@@ -196,19 +222,37 @@ def _cross(a, b):
     return (a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0])
 
 
-def _read_view(root, snapshot):
+def _read_view(root, snapshot, *, legacy=False, warnings=None):
+    warnings = warnings if warnings is not None else []
     camera = root.find("PerspectiveCamera")
     perspective = camera is not None
     if camera is None:
         camera = root.find("OrthogonalCamera")
     if camera is None:
+        if legacy:
+            warnings.append('BCF 2.1 viewpoints without a camera were retained as evidence; camera navigation is unavailable for them.')
+            return ViewpointRecord(_guid(root.get('Guid')), snapshot=snapshot, coordinate_frame={'meters_per_unit': 1, 'up_axis': 'Z'})
         raise ValueError("BCF viewpoint requires a camera.")
     eye = _vector(camera, "CameraViewPoint")
     direction = _normalize(_vector(camera, "CameraDirection"))
     right = _normalize(_cross(direction, _vector(camera, "CameraUpVector")))
     up = _cross(right, direction)
     try:
-        aspect = float(_text(camera, "AspectRatio", True))
+        if legacy and camera.find('AspectRatio') is None:
+            aspect = 1.0
+            if snapshot:
+                from PIL import Image
+                try:
+                    with Image.open(io.BytesIO(snapshot)) as image:
+                        if max(image.size) > 16384 or image.width * image.height > 64_000_000:
+                            raise ValueError('BCF snapshot is too large to infer camera aspect ratio.')
+                        aspect = image.width / image.height
+                except OSError as error:
+                    raise ValueError('Invalid BCF snapshot image.') from error
+            else:
+                warnings.append('BCF 2.1 cameras without a snapshot use an assumed 1:1 aspect ratio.')
+        else:
+            aspect = float(_text(camera, "AspectRatio", True))
         scale = float(_text(camera, "FieldOfView" if perspective else "ViewToWorldScale", True))
     except ValueError:
         raise ValueError("Invalid BCF camera scale.") from None
@@ -242,12 +286,14 @@ def read_bcf(path):
                 raise ValueError("BCF archive exceeds the import limits.")
             members = {info.filename: archive.read(info) for info in infos if not info.is_dir()}
         version = _xml(members.get("bcf.version", b""))
-        if version.tag != "Version" or version.get("VersionId") != "3.0":
-            raise ValueError("Only BCF XML 3.0 is supported.")
-        if "extensions.xml" not in members:
+        if version.tag != "Version" or version.get("VersionId") not in ('2.1', '3.0'):
+            raise ValueError('Only BCF XML 2.1 and 3.0 are supported.')
+        legacy = version.get('VersionId') == '2.1'
+        if not legacy and "extensions.xml" not in members:
             raise ValueError("BCF 3.0 requires extensions.xml.")
-        _xml(members["extensions.xml"])
-        issues, views, warnings = [], [], []
+        if 'extensions.xml' in members:
+            _xml(members['extensions.xml'])
+        issues, views, warnings, native_ids = [], [], [], []
         for filename, payload in sorted(members.items()):
             if not filename.endswith("/markup.bcf"):
                 continue
@@ -259,17 +305,14 @@ def read_bcf(path):
             topic_id = _guid(topic.get("Guid"))
             if topic_id != _guid(folder):
                 raise ValueError("BCF topic directory does not match its UUID.")
-            try:
-                status = Status(topic.get("TopicStatus"))
-            except ValueError:
-                raise ValueError("BCF topic has an unsupported status.") from None
+            status = _import_status(topic.get('TopicStatus'), legacy)
             if not topic.get("TopicType"):
                 raise ValueError("BCF topic requires TopicType.")
             title = _text(topic, "Title", True)
-            created = _date(_text(topic, "CreationDate", True))
+            created = _import_date(_text(topic, 'CreationDate', True), legacy, warnings)
             author = _text(topic, "CreationAuthor", True)
             topic_views = []
-            for entry in topic.findall("Viewpoints/ViewPoint"):
+            for entry in (root.findall('Viewpoints') if legacy else topic.findall('Viewpoints/ViewPoint')):
                 view_id = _guid(entry.get("Guid"))
                 ref = _text(entry, "Viewpoint")
                 snapshot_ref = _text(entry, "Snapshot")
@@ -281,18 +324,26 @@ def read_bcf(path):
                     view_name = folder + "/" + _safe_path(ref)
                     if view_name not in members:
                         raise ValueError("BCF references a missing viewpoint.")
-                    view = _read_view(_xml(members[view_name]), snapshot)
+                    view = _read_view(_xml(members[view_name]), snapshot, legacy=legacy, warnings=warnings)
                     if view.id != view_id:
                         raise ValueError("BCF viewpoint UUID mismatch.")
                 else:
                     view = ViewpointRecord(view_id, snapshot=snapshot, coordinate_frame={"meters_per_unit": 1, "up_axis": "Z"})
                 topic_views.append(view)
             comments = []
-            for node in topic.findall("Comments/Comment"):
+            for node in (root.findall('Comment') if legacy else topic.findall('Comments/Comment')):
                 view = node.find("Viewpoint")
-                comments.append(CommentRecord(_guid(node.get("Guid")), _text(node, "Comment"), _text(node, "Author", True), _date(_text(node, "Date", True)), _guid(view.get("Guid")) if view is not None else ""))
+                comment_author = _text(node, 'Author', required=not legacy)
+                if not comment_author.strip():
+                    comment_author = 'Unknown author'
+                    warnings.append('A BCF 2.1 comment has no author; it was retained with Unknown author attribution.')
+                comments.append(CommentRecord(_guid(node.get('Guid')), _text(node, 'Comment'), comment_author, _import_date(_text(node, 'Date', True), legacy, warnings), _guid(view.get('Guid')) if view is not None else ''))
             comment_views = {c.viewpoint_id for c in comments if c.viewpoint_id}
             initial = next((v.id for v in topic_views if v.id not in comment_views), "")
+            if legacy and not initial:
+                initial = next((v.id for v in topic_views if v.camera), '')
+                if initial:
+                    warnings.append('BCF 2.1 topics without a separate initial view use their first camera viewpoint for issue navigation.')
             related = tuple(dict.fromkeys(ref for v in topic_views for ref in v.selection))
             native_name = folder + "/omniverse.json"
             if native_name in members:
@@ -304,6 +355,7 @@ def read_bcf(path):
                     if any(not all(isinstance(v, str) for v in asdict(ref).values()) for ref in related):
                         raise ValueError("Invalid native component identity.")
                     initial = native.get("initial_viewpoint_id", initial)
+                    native_ids.extend(v.id for v in topic_views if v.id in native.get('views', {}))
                     topic_views = [_native_view(v, native["views"][v.id]) if v.id in native.get("views", {}) else v for v in topic_views]
                 except (TypeError, KeyError, json.JSONDecodeError) as error:
                     raise ValueError("Invalid Omniverse metadata.") from error
@@ -311,11 +363,11 @@ def read_bcf(path):
             ids = {v.id for v in topic_views}
             if initial and initial not in ids or comment_views - ids:
                 raise ValueError("BCF issue references an absent viewpoint.")
-            if any(topic.find(name) is not None for name in ("BimSnippet", "DocumentReferences", "RelatedTopics", "AssignedTo", "Labels")):
-                warnings.append(f"Topic {topic_id} contains unsupported optional fields.")
-            issues.append(IssueRecord(topic_id, _text(topic, "Description") or title, status, author, created, _date(_text(topic, "ModifiedDate") or created), _text(topic, "ModifiedAuthor") or author, related_elements=related, initial_viewpoint_id=initial, comments=tuple(comments), bcf_topic_id=topic_id))
+            if any(topic.find(name) is not None for name in ("BimSnippet", "DocumentReferences", "RelatedTopics", "AssignedTo", "DueDate", "Labels")):
+                warnings.append('Assignment, due dates, labels, documents, related topics, and BIM snippets are outside the supported import fields.' if legacy else f'Topic {topic_id} contains unsupported optional fields.')
+            issues.append(IssueRecord(topic_id, _text(topic, "Description"), status, author, created, _import_date(_text(topic, 'ModifiedDate') or created, legacy, warnings), _text(topic, "ModifiedAuthor") or author, related_elements=related, initial_viewpoint_id=initial, comments=tuple(comments), bcf_topic_id=topic_id, title=title, issue_type=topic.get("TopicType")))
             views.extend(topic_views)
-        document = BcfDocument(tuple(issues), tuple(views), tuple(dict.fromkeys(warnings)))
+        document = BcfDocument(tuple(issues), tuple(views), tuple(dict.fromkeys(warnings)), tuple(dict.fromkeys(native_ids)))
         _validate_document(document)
         return document
     except (BadZipFile, OSError, RuntimeError) as error:
@@ -355,8 +407,8 @@ def _validate_document(document):
             raise ValueError("Duplicate BCF topic UUID.")
         topics.add(topic)
         _guid(issue.id)
-        if not issue.description.strip() or not issue.author.strip():
-            raise ValueError("BCF issue needs description and author.")
+        if not (issue.title or issue.description).strip() or not issue.author.strip():
+            raise ValueError("BCF issue needs title and author.")
         Status(issue.status)
         _date(issue.created_at)
         _date(issue.modified_at)
@@ -406,6 +458,8 @@ def _to_bcf_vector(values, frame, point=False):
 
 
 def _write_view(view):
+    from .bcf_coordinates import export_view
+    view = export_view(view)
     root = ET.Element("VisualizationInfo", Guid=_guid(view.id))
     if view.selection or view.coordinate_frame.get("bcf_has_visibility"):
         components = _sub(root, "Components")
@@ -466,7 +520,9 @@ def write_bcf(document, path):
                 archive.writestr(name, ET.tostring(node, encoding="utf-8", xml_declaration=True))
             xml("bcf.version", ET.Element("Version", VersionId="3.0"))
             extensions = ET.Element("Extensions")
-            _sub(_sub(extensions, "TopicTypes"), "TopicType", "Issue")
+            types = _sub(extensions, "TopicTypes")
+            for name in dict.fromkeys(issue.issue_type for issue in document.issues):
+                _sub(types, "TopicType", name)
             statuses = _sub(extensions, "TopicStatuses")
             for status in Status:
                 _sub(statuses, "TopicStatus", status.value)
@@ -475,8 +531,8 @@ def write_bcf(document, path):
             for issue in document.issues:
                 folder = _guid(issue.bcf_topic_id or issue.id)
                 markup = ET.Element("Markup")
-                topic = _sub(markup, "Topic", Guid=folder, TopicType="Issue", TopicStatus=issue.status.value)
-                _sub(topic, "Title", issue.description.splitlines()[0][:255] or "Issue")
+                topic = _sub(markup, "Topic", Guid=folder, TopicType=issue.issue_type, TopicStatus=issue.status.value)
+                _sub(topic, "Title", issue.title or issue.description.splitlines()[0][:255] or "Issue")
                 _sub(topic, "CreationDate", issue.created_at)
                 _sub(topic, "CreationAuthor", issue.author)
                 _sub(topic, "ModifiedDate", issue.modified_at)
@@ -520,6 +576,10 @@ def write_bcf(document, path):
 
 def plan_import(document, store):
     _validate_document(document)
+    from .bcf_coordinates import import_view, stage_mapping
+    needs_mapping = any(v.camera and v.id not in document.native_viewpoints and 'bcf_has_visibility' in v.coordinate_frame and 'bcf_reference_mapping' not in v.coordinate_frame for v in document.viewpoints)
+    mapping = stage_mapping(store.stage) if needs_mapping else ()
+    document = replace(document, viewpoints=tuple(v if v.id in document.native_viewpoints else import_view(v, mapping) for v in document.viewpoints))
     existing = store.list_issues()
     topics = {r.bcf_topic_id or r.id: r for r in existing}
     conflicts = []
@@ -528,17 +588,20 @@ def plan_import(document, store):
         local = topics.get(topic_id)
         if local is None:
             continue
-        for field in ("description", "status"):
+        for field in ("title", "description", "status", "issue_type"):
             current, received = getattr(local, field), getattr(incoming, field)
             current = current.value if isinstance(current, Status) else current
             received = received.value if isinstance(received, Status) else received
             baseline = local.import_baseline.get(field)
             if current != received and (baseline is None or current != baseline and received != baseline):
                 conflicts.append(Conflict(topic_id + ":" + field, topic_id, field, current, received, baseline))
-    return ImportPlan(document, tuple(conflicts), store.stage, existing)
+    return ImportPlan(document, tuple(conflicts), store.stage, existing, mapping)
 
 
 def apply_import(plan, choices, service):
+    from .bcf_coordinates import stage_mapping
+    if plan.frame_signature and stage_mapping(service.stage) != plan.frame_signature:
+        raise ValueError('The model coordinate frame changed after import preview. Preview the file again.')
     if service.stage is not plan.stage or service.list_issues() != plan.expected_records:
         raise ValueError("The scene changed after import preview. Preview the file again.")
     for conflict in plan.conflicts:
@@ -554,7 +617,7 @@ def apply_import(plan, choices, service):
         local = topics.get(topic_id)
         baseline = dict(local.import_baseline) if local else {}
         fields = {}
-        for field in ("description", "status"):
+        for field in ("title", "description", "status", "issue_type"):
             received = getattr(incoming, field)
             received_value = received.value if isinstance(received, Status) else received
             key = topic_id + ":" + field
@@ -579,7 +642,7 @@ def apply_import(plan, choices, service):
             record = replace(local, **fields, **attribution, comments=local.comments + new_comments, bcf_topic_id=topic_id, import_baseline=baseline, related_elements=tuple(dict.fromkeys(local.related_elements + incoming.related_elements)), initial_viewpoint_id=local.initial_viewpoint_id or incoming.initial_viewpoint_id)
             updated += int(record != local)
         else:
-            record = replace(incoming, **fields, id=topic_id, bcf_topic_id=topic_id, anchor=None, import_baseline=baseline)
+            record = replace(incoming, **fields, id=topic_id, bcf_topic_id=topic_id, anchor=None, import_baseline=baseline, number=0)
             created += 1
         records.append(record)
         for identity in dict.fromkeys(v for v in (record.initial_viewpoint_id, *(c.viewpoint_id for c in record.comments)) if v):
@@ -591,6 +654,8 @@ def apply_import(plan, choices, service):
                 pending_views.append((record.id, replace(views[identity], markup_path="")))
     def operation():
         for record in records:
+            if record.number <= 0:
+                record = replace(record, number=service.store.next_number())
             service.store.put_issue(record)
         for issue_id, view in pending_views:
             service.store.put_viewpoint(view, issue_id)

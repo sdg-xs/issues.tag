@@ -1,3 +1,4 @@
+from verify_kit import enable_extension
 """Acceptance coverage for the installed Section Box public integration."""
 
 import importlib
@@ -24,7 +25,7 @@ async def test_section_box_controls_and_planes_restore_with_issue(service):
     state = None
     previous = None
     try:
-        manager.set_extension_enabled_immediate('section.box', True)
+        enable_extension('section.box', True)
         assert manager.is_extension_enabled('section.box'), 'The installed section.box extension must activate'
         section_box = importlib.import_module('section_box')
         from section_box.model import Face, SectionBox
@@ -96,7 +97,7 @@ async def test_section_box_controls_and_planes_restore_with_issue(service):
         if adapter is not None:
             adapter.destroy()
         if not was_enabled and manager.is_extension_enabled('section.box'):
-            manager.set_extension_enabled_immediate('section.box', False)
+            enable_extension('section.box', False)
         await frames(5)
 
 async def test_unsectioned_issue_disables_later_section_controller(service):
@@ -107,7 +108,7 @@ async def test_unsectioned_issue_disables_later_section_controller(service):
     previous = None
     if was_enabled:
         previous = importlib.import_module('section_box').get_runtime_state().snapshot
-        manager.set_extension_enabled_immediate('section.box', False)
+        enable_extension('section.box', False)
     adapter = None
     try:
         viewport = get_active_viewport(usd_context_name=None)
@@ -120,7 +121,7 @@ async def test_unsectioned_issue_disables_later_section_controller(service):
         saved = adapter.capture()
         assert not saved.section_state, 'The fixture must capture before Section Box is enabled'
         issue_id = service.create_issue('Review captured before enabling Section Box', viewpoint=saved)
-        manager.set_extension_enabled_immediate('section.box', True)
+        enable_extension('section.box', True)
         from section_box.model import SectionBox, Face
         state = importlib.import_module('section_box').get_runtime_state()
         state.sync_stage()
@@ -136,9 +137,9 @@ async def test_unsectioned_issue_disables_later_section_controller(service):
         if adapter:
             adapter.destroy()
         if manager.is_extension_enabled('section.box'):
-            manager.set_extension_enabled_immediate('section.box', False)
+            enable_extension('section.box', False)
         if was_enabled:
-            manager.set_extension_enabled_immediate('section.box', True)
+            enable_extension('section.box', True)
             if previous is not None:
                 importlib.import_module('section_box').get_runtime_state().apply(previous)
         await frames(5)
@@ -165,7 +166,7 @@ async def test_inactive_viewport_does_not_capture_active_section_box(service):
         active = get_active_viewport(usd_context_name=None)
         inactive = window.viewport_api if active != window.viewport_api else primary
         assert inactive != active and inactive.stage == active.stage == service.stage
-        manager.set_extension_enabled_immediate('section.box', True)
+        enable_extension('section.box', True)
         from section_box.model import SectionBox, Face
         state = importlib.import_module('section_box').get_runtime_state()
         state.sync_stage()
@@ -185,7 +186,7 @@ async def test_inactive_viewport_does_not_capture_active_section_box(service):
         if adapter:
             adapter.destroy()
         if not was_enabled and manager.is_extension_enabled('section.box'):
-            manager.set_extension_enabled_immediate('section.box', False)
+            enable_extension('section.box', False)
         if window:
             window.destroy()
         await frames(5)

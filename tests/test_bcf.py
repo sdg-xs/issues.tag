@@ -101,7 +101,7 @@ async def test_import_preview_rejects_stale_scene(service):
 async def test_invalid_archive_has_no_partial_import(service):
     bcf = bcf_api()
     path = ROOT / "verification" / "invalid.bcf"
-    cases = [("../escape.xml", b"<Version VersionId='3.0'/>") , ("bcf.version", b"<Version VersionId='2.1'/>"), ("bcf.version", b"<!DOCTYPE Version [<!ENTITY x SYSTEM 'file:///secret'>]><Version VersionId='3.0'/>"), ("bcf.version", b"<broken")]
+    cases = [("../escape.xml", b"<Version VersionId='3.0'/>") , ("bcf.version", b"<Version VersionId='2.0'/>"), ("bcf.version", b"<!DOCTYPE Version [<!ENTITY x SYSTEM 'file:///secret'>]><Version VersionId='3.0'/>"), ("bcf.version", b"<broken")]
     for name, payload in cases:
         with ZipFile(path, "w") as archive:
             archive.writestr(name, payload)

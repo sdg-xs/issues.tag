@@ -11,6 +11,7 @@ keywords = ["issues", "BCF", "BIM", "review"]
 "omni.kit.commands" = {}
 "omni.kit.usd_undo" = {}
 "omni.kit.menu.utils" = {}
+"omni.kit.widget.toolbar" = {}
 "omni.kit.viewport.utility" = {}
 "omni.kit.viewport.window" = {}
 "omni.kit.viewport.registry" = {}

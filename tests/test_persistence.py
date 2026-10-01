@@ -1,3 +1,4 @@
+from verify_kit import enable_extension
 from pathlib import Path
 
 import omni.usd
@@ -7,7 +8,7 @@ from verify_kit import ROOT, frames
 
 async def service_for_new_scene():
     import omni.kit.app
-    omni.kit.app.get_app().get_extension_manager().set_extension_enabled_immediate("issues.tag", True)
+    enable_extension("issues.tag", True)
     context = omni.usd.get_context()
     await context.new_stage_async()
     await frames(5)
@@ -139,3 +140,30 @@ async def test_failed_issue_transaction_has_no_partial_records():
     else:
         raise AssertionError("Failed transaction did not report failure")
     assert service.get_issue(issue_id) == original, "Failed import retained a partial issue edit"
+
+
+async def test_viewpoint_lookup_does_not_walk_building_geometry():
+    service = await service_for_new_scene()
+    from uuid import uuid4
+    from unittest.mock import patch
+    from issues_tag.model import ViewpointRecord
+    view = ViewpointRecord(str(uuid4()), snapshot=b"Saved evidence")
+    service.create_issue("Review a large building", viewpoint=view)
+    for index in range(128):
+        UsdGeom.Cube.Define(service.stage, f"/Building/Component_{index}")
+    visited_model_prims = []
+    traverse = Usd.Stage.Traverse
+    def measured_traversal(stage, *args, **kwargs):
+        for prim in traverse(stage, *args, **kwargs):
+            if str(prim.GetPath()).startswith("/Building"):
+                visited_model_prims.append(str(prim.GetPath()))
+            yield prim
+    with patch.object(Usd.Stage, "Traverse", measured_traversal):
+        assert service.store.get_viewpoint(view.id) == view
+        try:
+            service.store.get_viewpoint(str(uuid4()))
+        except KeyError:
+            pass
+        else:
+            raise AssertionError("Unknown viewpoint lookup did not report missing evidence")
+    assert not visited_model_prims, "Saved viewpoint lookup traversed unrelated building geometry"

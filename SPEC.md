@@ -1,6 +1,12 @@
 # Omniverse issue management specification
 
+Implementation improvement pass, 2026-09-30: retain the approved single-editor USD and BCF scope. Pins use distinct status colors and letters: Open/red/O, In progress/amber/P, Resolved/green/R, Closed/gray/C. Surface placement displays an explicit prompt and Cancel action; repeat requests are disabled until placement completes or is cancelled. Cancellation creates no record and changes no attachment. A pick from a replaced or closed scene is discarded before issue creation. Pin validation is reused between unchanged viewport frames and invalidated by scene changes, including transforms, visibility, identity ambiguity, and geometry revisions. Camera navigation must not repeat model attachment scans; camera parents containing model geometry still invalidate affected pins. Saved viewpoint lookup searches issue records without traversing unrelated building geometry. The prior live placement pause remains an unresolved performance acceptance item until measured on the representative model.
+
 This specification is the single product and implementation reference for native Omniverse issue management. The first milestone uses ACC model-viewer issues as the interaction reference and includes persistent surface pins, comments, saved review viewpoints, Markup annotations, and BCF file exchange. Product scope is confirmed. The testing approach below is proposed for review, and the technical validation items remain open.
+
+Issue refocus reuses the existing primary viewport perspective camera, as native Markup does. Native evidence uses Markup's public recall API; ordinary issues and BCF views restore their portable camera data into the same perspective camera in the session layer. A separate review camera is retained only when the perspective camera is missing, animated, shared with another viewport, or the review targets a secondary viewport.
+
+New issue creation follows this workflow: place a surface pin, open native Markup, enter a description and draw annotations, then choose Save & close. Save creates the issue with its anchor, saved view, native Markup reference, and annotated PNG snapshot. The description editor is hidden before screenshot capture. Cancel or closing the editor creates no issue and removes its owned unsaved Markup draft. Reattaching an existing issue retains the existing placement workflow.
 
 ## Problem Statement
 
@@ -11,6 +17,8 @@ The project scene is a parent USD file that references building USD files. Revie
 ## Solution
 
 Add an Issues panel and interactive viewport pins. A reviewer clicks a model surface to create an issue, writes a description, and manages its related elements. The extension captures the initial review viewpoint and restores it when the issue opens.
+
+An Issues button with a circle-and-check icon appears on Kit's main toolbar beside Section Box. Clicking it opens the existing Issues panel; clicking again reuses that panel.
 
 Reviewers add comments, optional comment viewpoints, and annotations through supported Omniverse Markup functionality. Issue records persist in the parent USD scene and use its normal Save workflow. BCF files carry supported issue data and viewpoints between tools. Missing model references remain visible and recoverable rather than causing an issue to disappear.
 
@@ -122,7 +130,9 @@ The primary user is a model reviewer. A subsequent reviewer can open the saved p
 - A viewpoint records the camera, section cuts, visibility, and selected elements needed to restore the review context.
 - Opening an issue restores its saved review view. Focus related elements is a separate action and does not overwrite that saved view.
 - Supported Omniverse Markup APIs are reuse candidates for camera capture and recall, annotations, and snapshots. Surface-attached pins and the issue lifecycle require their own behavior.
+- Existing native Markup evidence uses its public camera recall when the primary viewport is eligible. Opening a saved issue or comment view must leave navigation available and must not rewrite the saved evidence. Portable issue and BCF viewpoints retain camera restoration when native Markup is absent; ordinary selection must not generate thumbnails or new Markup records.
 - Markup annotations remain editable in USD. BCF exports include annotated snapshots. Exchange of editable annotation primitives depends on the eventual BCF compatibility target.
+- Evidence screenshots contain only the model and Markup annotations within the viewport. Viewport controls, HUD, guides, manipulators, issue pins, and floating windows overlapping the viewport are temporarily hidden for capture. Surrounding docked panels and tabs stay in place. Previous visibility is restored after capture.
 - Rendering and viewpoint conversion must account for stage units, axes, model placement, and the coordinate frame used by BCF.
 
 ### BCF file exchange
@@ -167,7 +177,7 @@ The milestone must demonstrate these outcomes in the target Kit application:
 | Continue as another reviewer | Saved issues can be read, commented on, and updated by the next editor without assignment or role restrictions. |
 | Edit without saving | Unsaved state is visible and the scene is not automatically saved. |
 
-Integration tests use a numeric tolerance of 1e-6 for native camera and clipping comparisons and generated repeated-reference model fixtures. The implemented file profile is BCF XML 3.0. External compatibility testing remains pending until a partner application is chosen; representative production models and revisions still need validation.
+Integration tests use a numeric tolerance of 1e-6 for native camera and clipping comparisons and generated repeated-reference model fixtures. Import accepts BCF XML 2.1 and 3.0; export uses 3.0. The supplied 106-issue BCF 2.1 archive passes offline import, USD save/reopen, repeat import, and BCF 3.0 round-trip checks. Missing source timezones are interpreted as UTC with a warning; missing comment authors and camera-free evidence remain explicit. Rendered external compatibility, representative production models, and model revisions still need validation.
 
 No performance limits or model-size targets have been agreed. Technical planning must establish them before treating them as measured capabilities.
 

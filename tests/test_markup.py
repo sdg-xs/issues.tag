@@ -1,3 +1,4 @@
+from verify_kit import enable_extension
 import asyncio
 import importlib.util
 import io
@@ -140,36 +141,44 @@ async def test_annotated_comment_reopens_editably(service):
     UsdLux.DomeLight.Define(service.stage, '/EvidenceLight').GetIntensityAttr().Set(1000)
     viewport = get_active_viewport()
     viewport.camera_path = '/Camera'
-    service.viewport = ViewportAdapter(service, viewport)
-    await frames(30)
-    initial = service.viewport.capture()
-    issue = service.create_issue('Markup evidence', viewpoint=initial)
-    record = await adapter.capture_viewpoint()
-    before = record.snapshot
-    await adapter.begin(record)
-    adapter.core.add_element(20, 20, 70, 60, 'Arrow', {'Markup.Viewport.Arrow': {'color': 0xff0000ff, 'border_width': 5}, 'ArrowDirection': 1}, color=-16776961)
-    adapter.core.add_element(30, 60, 70, 80, 'Label', {'Markup.Viewport.Comment': {'color': 0xff0000ff, 'font_size': 24}}, text='Check opening', color=-16776961, pixel_size=(350, 90))
-    annotated = await adapter.finish(record)
-    (Path(__file__).resolve().parent.parent / 'verification' / 'markup-before.png').write_bytes(before)
-    (Path(__file__).resolve().parent.parent / 'verification' / 'markup-after.png').write_bytes(annotated.snapshot)
-    assert annotated.snapshot.startswith(b'\x89PNG')
-    assert annotated.snapshot != before, 'Annotated image must include the drawn evidence'
-    rendered = Image.open(io.BytesIO(annotated.snapshot)).convert('RGB')
-    upper = rendered.crop((0, 0, rendered.width, rendered.height // 2))
-    assert sum(r > 180 and g < 100 and b < 100 for r, g, b in upper.getdata()) > 10, 'The rendered evidence has no red annotation in the model area'
-    Image.open(io.BytesIO(annotated.snapshot)).verify()
-    service.add_comment(issue, 'Review arrow', annotated)
-    assert service.get_issue(issue).initial_viewpoint_id == initial.id
-    root = Path(__file__).resolve().parent.parent / 'verification' / 'markup-parent.usda'
-    service.stage.GetRootLayer().Export(str(root))
-    await service._context.open_stage_async(str(root))
-    await frames(20)
-    saved = service.store.get_viewpoint(record.id)
-    assert service.stage.GetRootLayer().GetPrimAtPath(saved.markup_path)
-    await adapter.begin(saved)
-    assert len(adapter.core.get_markup_elements()) >= 2
-    await adapter.finish(saved, save=False)
-    adapter.destroy()
+    original_viewport = service.viewport
+    review_viewport = ViewportAdapter(service, viewport)
+    service.viewport = review_viewport
+    try:
+        await frames(30)
+        initial = service.viewport.capture()
+        issue = service.create_issue('Markup evidence', viewpoint=initial)
+        record = await adapter.capture_viewpoint()
+        before = record.snapshot
+        await adapter.begin(record)
+        adapter.core.add_element(20, 20, 70, 60, 'Arrow', {'Markup.Viewport.Arrow': {'color': 0xff0000ff, 'border_width': 5}, 'ArrowDirection': 1}, color=-16776961)
+        adapter.core.add_element(30, 60, 70, 80, 'Label', {'Markup.Viewport.Comment': {'color': 0xff0000ff, 'font_size': 24}}, text='Check opening', color=-16776961, pixel_size=(350, 90))
+        annotated = await adapter.finish(record)
+        (Path(__file__).resolve().parent.parent / 'verification' / 'markup-before.png').write_bytes(before)
+        (Path(__file__).resolve().parent.parent / 'verification' / 'markup-after.png').write_bytes(annotated.snapshot)
+        assert annotated.snapshot.startswith(b'\x89PNG')
+        assert annotated.snapshot != before, 'Annotated image must include the drawn evidence'
+        rendered = Image.open(io.BytesIO(annotated.snapshot)).convert('RGB')
+        upper = rendered.crop((0, 0, rendered.width, rendered.height // 2))
+        assert sum(r > 180 and g < 100 and b < 100 for r, g, b in upper.getdata()) > 10, 'The rendered evidence has no red annotation in the model area'
+        Image.open(io.BytesIO(annotated.snapshot)).verify()
+        service.add_comment(issue, 'Review arrow', annotated)
+        assert service.get_issue(issue).initial_viewpoint_id == initial.id
+        root = Path(__file__).resolve().parent.parent / 'verification' / 'markup-parent.usda'
+        service.stage.GetRootLayer().Export(str(root))
+        await service._context.open_stage_async(str(root))
+        await frames(20)
+        saved = service.store.get_viewpoint(record.id)
+        assert service.stage.GetRootLayer().GetPrimAtPath(saved.markup_path)
+        await adapter.begin(saved)
+        assert len(adapter.core.get_markup_elements()) >= 2
+        await adapter.finish(saved, save=False)
+    finally:
+        service.viewport = original_viewport
+        try:
+            adapter.destroy()
+        finally:
+            review_viewport.destroy()
 
 
 async def test_capture_stage_change_discards_result(service):
@@ -293,6 +302,45 @@ async def test_creation_callback_cancellation_releases_markup_and_edit_target(se
         adapter.destroy()
 
 
+def _capture_cycle_phase(cycle, phase, stage):
+    import json
+    import os
+    from datetime import datetime, timezone
+    milestone = {'cycle': cycle, 'phase': phase, 'stage': stage.GetRootLayer().identifier,
+                 'updated_at': datetime.now(timezone.utc).isoformat()}
+    destination = Path(__file__).resolve().parent.parent / 'verification' / 'capture-cycle.json'
+    temporary = destination.with_suffix('.json.tmp')
+    with temporary.open('w', encoding='utf-8') as stream:
+        json.dump(milestone, stream, indent=2)
+        stream.flush()
+        os.fsync(stream.fileno())
+    from verification_progress import replace_progress
+    replace_progress(temporary, destination)
+    print('ISSUES_CAPTURE_CYCLE', json.dumps(milestone), flush=True)
+
+
+async def test_creation_cancellation_then_scene_replacement_repeated(service):
+    from test_persistence import service_for_new_scene
+    current = service
+    for cycle in range(5):
+        _capture_cycle_phase(cycle, 'before_capture', current.stage)
+        await test_creation_callback_cancellation_releases_markup_and_edit_target(current)
+        _capture_cycle_phase(cycle, 'after_cancel', current.stage)
+        previous_stage = current.stage
+        assert previous_stage.GetEditTarget().GetLayer() == previous_stage.GetSessionLayer()
+        camera = previous_stage.GetPrimAtPath(current.viewport.viewport.camera_path)
+        lock = camera.GetAttribute('omni:kit:cameraLock')
+        assert not lock or not lock.Get(), f'Cancelled capture left navigation locked in cycle {cycle}'
+        _capture_cycle_phase(cycle, 'before_stage', current.stage)
+        current = await service_for_new_scene()
+        _capture_cycle_phase(cycle, 'after_stage', current.stage)
+        assert current.stage != previous_stage, f'Fixture retained the previous scene in cycle {cycle}'
+        assert not current.list_issues(), f'Cancelled evidence crossed into the new scene in cycle {cycle}'
+        markups = current.stage.GetPrimAtPath('/Viewport_Markups')
+        assert not markups or not markups.GetChildren(), f'Cancelled native Markup crossed into the new scene in cycle {cycle}'
+    _capture_cycle_phase(cycle, 'complete', current.stage)
+
+
 async def test_external_vendor_edit_defers_original_target_restoration(service):
     from verify_kit import frames
     adapter = adapter_for(service)
@@ -373,7 +421,7 @@ async def test_destroy_during_creation_callback_releases_capture(service):
     def cancel_and_destroy(*args):
         task.cancel()
         adapter.destroy()
-        manager.set_extension_enabled_immediate('issues.tag', False)
+        enable_extension('issues.tag', False)
     callback = MarkupChangeCallbacks(on_markup_created=cancel_and_destroy)
     core.register_callback(callback)
     try:
@@ -395,7 +443,7 @@ async def test_destroy_during_creation_callback_releases_capture(service):
         core.unlock_camera()
         adapter.destroy()
         stage.SetEditTarget(original_target)
-        manager.set_extension_enabled_immediate('issues.tag', True)
+        enable_extension('issues.tag', True)
 
 
 async def test_replacement_edit_preserves_newer_explicit_target(service):
