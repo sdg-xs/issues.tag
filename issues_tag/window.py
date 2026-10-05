@@ -41,6 +41,7 @@ class IssuesWindow:
         self.author = ui.SimpleStringModel(self._author_name)
         self.status_filter = 'All statuses'
         self.type_filter = 'All types'
+        self._type_manager = None
         self.records, self.types = (), ()
         self.load_error = ''
         self._error = ''
@@ -128,6 +129,13 @@ class IssuesWindow:
         setattr(self, attribute, values[model.get_item_value_model().as_int])
         self.refresh()
 
+    def _manage_types(self):
+        if self._destroyed or self.service.stage is None or self.load_error:
+            return
+        if self._type_manager is None or self._type_manager._destroyed:
+            self._type_manager = IssueTypesWindow(self.service)
+        self._type_manager.show()
+
     def refresh(self, *args):
         if self._destroyed:
             return
@@ -140,6 +148,9 @@ class IssuesWindow:
             self._stage = self.service.stage
             self.selected_issue_id = None
             self._error = ''
+            if self._type_manager is not None:
+                self._type_manager.destroy()
+                self._type_manager = None
         try:
             types = self.service.list_types() if self.service.stage is not None else ('Default',)
             if self.type_filter not in ('All types', *types):
@@ -178,16 +189,15 @@ class IssuesWindow:
                           enabled=bool(self._on_cancel_placement))
             ui.Label('Search', name='section', height=18)
             ui.StringField(self.search, height=28, tooltip='Search issue number, title or description')
-            with ui.HStack(height=18, spacing=6):
-                ui.Label('Status', name='section')
-                ui.Label('Type', name='section')
-            with ui.HStack(height=28, spacing=6):
-                statuses = ('All statuses', *(s.value for s in Status))
-                types = ('All types', *self.types)
-                status = ui.ComboBox(statuses.index(self.status_filter), *statuses)
-                status.model.add_item_changed_fn(lambda model, item: self._filter(model, statuses, 'status_filter'))
-                type_box = ui.ComboBox(types.index(self.type_filter), *types)
-                type_box.model.add_item_changed_fn(lambda model, item: self._filter(model, types, 'type_filter'))
+            ui.Label('Status', name='section', height=18)
+            statuses = ('All statuses', *(s.value for s in Status))
+            status = ui.ComboBox(statuses.index(self.status_filter), *statuses, height=28)
+            status.model.add_item_changed_fn(lambda model, item: self._filter(model, statuses, 'status_filter'))
+            ui.Label('Type', name='section', height=18)
+            types = ('All types', *self.types)
+            type_box = ui.ComboBox(types.index(self.type_filter), *types, height=28)
+            type_box.model.add_item_changed_fn(lambda model, item: self._filter(model, types, 'type_filter'))
+            ui.Button('Manage types', height=28, clicked_fn=self._manage_types, enabled=can_edit)
             with ui.ScrollingFrame():
                 with ui.VStack(spacing=6, height=0):
                     if self.load_error or self._error:
@@ -224,7 +234,9 @@ class IssuesWindow:
         self._stage = self._signature = None
         self.records, self.types = (), ()
         errors = []
-        actions = (lambda: service.remove_listener(self.refresh),
+        manager, self._type_manager = self._type_manager, None
+        actions = (lambda: manager.destroy() if manager else None,
+                   lambda: service.remove_listener(self.refresh),
                    lambda: self.search.remove_value_changed_fn(self._search_listener),
                    lambda: setattr(service.viewport, 'filtered_issue_ids', None) if service.viewport else None,
                    window.destroy)
@@ -235,6 +247,145 @@ class IssuesWindow:
                 errors.append(exc)
         if errors:
             raise ExceptionGroup('Issue list cleanup failed', errors)
+
+
+class IssueTypesWindow:
+    def __init__(self, service):
+        self.service = service
+        self._stage = service.stage
+        self._destroyed = False
+        self._signature = None
+        self._error = ''
+        self.load_error = ''
+        self.types = ()
+        self.counts = {}
+        self.selected_type = 'Default'
+        self.replacement = None
+        self.type_name = ui.SimpleStringModel('')
+        self.window = ui.Window('Manage issue types', width=360, height=480)
+        self.window.frame.style = STYLE
+        self.window.frame.set_build_fn(self._build)
+        service.add_listener(self.refresh)
+        self.refresh()
+
+    def show(self):
+        if self._destroyed:
+            return
+        self.window.visible = True
+        self._signature = None
+        self.refresh()
+
+    def refresh(self, *args):
+        if self._destroyed:
+            return
+        if self.service.stage is not self._stage:
+            self.destroy()
+            return
+        try:
+            types = self.service.list_types()
+            records = self.service.list_issues()
+            counts = {name: sum(record.issue_type == name for record in records) for name in types}
+            error = ''
+        except ValueError as exc:
+            types, counts, error = (), {}, str(exc)
+        self.types, self.counts, self.load_error = types, counts, error
+        if self.selected_type not in types:
+            self.selected_type = types[0] if types else None
+            self.replacement = None
+        if self.replacement not in types or self.replacement == self.selected_type:
+            self.replacement = None
+        signature = (types, tuple(counts.items()), self.selected_type, self.replacement, self._error, error)
+        if self.window.visible and signature != self._signature:
+            self._signature = signature
+            self.window.frame.rebuild()
+
+    def _select(self, name):
+        if self._destroyed:
+            return
+        self.selected_type = name
+        self.replacement = None
+        self._error = ''
+        self.refresh()
+
+    def _pick_replacement(self, model, choices):
+        if self._destroyed:
+            return
+        self.replacement = choices[model.get_item_value_model().as_int]
+        self._error = ''
+        self.refresh()
+
+    def _create(self):
+        if self._destroyed or self.load_error:
+            return
+        try:
+            name = self.service.create_type(self.type_name.as_string)
+        except Exception as exc:
+            self._error = str(exc)
+        else:
+            self.type_name.set_value('')
+            self.selected_type = name
+            self.replacement = None
+            self._error = ''
+        self.refresh()
+
+    def _delete(self):
+        if self._destroyed or self.load_error or self.selected_type in (None, 'Default'):
+            return
+        try:
+            self.service.delete_type(self.selected_type, self.replacement)
+        except Exception as exc:
+            self._error = str(exc)
+        else:
+            self._error = ''
+            self.replacement = None
+        self.refresh()
+
+    def _build(self):
+        if self._destroyed:
+            return
+        can_edit = self.service.stage is not None and not self.load_error
+        with ui.VStack(spacing=8, margin=12):
+            ui.Label('ISSUE TYPES', name='heading', height=28)
+            with ui.ScrollingFrame():
+                with ui.VStack(spacing=6, height=0):
+                    for name in self.types:
+                        count = self.counts[name]
+                        noun = 'issue' if count == 1 else 'issues'
+                        ui.Button(f'{name} ({count} {noun})', height=28,
+                                  name='selected' if name == self.selected_type else '',
+                                  clicked_fn=lambda value=name: self._select(value))
+            ui.Label('New type name', name='section', height=18)
+            ui.StringField(self.type_name, height=28, enabled=can_edit)
+            ui.Button('Create', height=28, clicked_fn=self._create, enabled=can_edit)
+            count = self.counts.get(self.selected_type, 0)
+            if self.selected_type == 'Default':
+                ui.Label('Default cannot be deleted.', name='muted', height=24)
+            elif count:
+                usage = '1 issue uses' if count == 1 else f'{count} issues use'
+                ui.Label(f'{usage} this type. Choose a replacement before deleting.',
+                         name='muted', word_wrap=True, height=40)
+                choices = (None, *(name for name in self.types if name != self.selected_type))
+                combo = ui.ComboBox(choices.index(self.replacement), 'Choose replacement', *choices[1:],
+                                    height=28, enabled=can_edit)
+                combo.model.add_item_changed_fn(lambda model, item: self._pick_replacement(model, choices))
+            ui.Button('Delete type', height=28, clicked_fn=self._delete,
+                      enabled=can_edit and self.selected_type not in (None, 'Default')
+                      and (not count or self.replacement is not None))
+            if self.load_error or self._error:
+                ui.Label(self.load_error or self._error, name='error', word_wrap=True, height=40)
+            ui.Label('Save the scene to keep type changes.', name='muted', height=24)
+            ui.Button('Close', height=28, clicked_fn=self.destroy)
+
+    def destroy(self):
+        if self._destroyed:
+            return
+        self._destroyed = True
+        service, self.service = self.service, None
+        window, self.window = self.window, None
+        try:
+            service.remove_listener(self.refresh)
+        finally:
+            window.destroy()
 
 
 class IssueDetailsWindow:

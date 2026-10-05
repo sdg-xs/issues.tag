@@ -1,5 +1,5 @@
 [package]
-version = "0.1.0"
+version = "0.2.0"
 title = "Issues"
 description = "Project issue review, surface pins, viewpoints, and BCF file exchange."
 category = "Viewport"

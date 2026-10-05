@@ -127,7 +127,31 @@ class IssueService:
         return self.store.list_types()
 
     def create_type(self, name):
+        self.store.require_writable()
+        name = self.store.validate_new_type(name)
         return self.mutate(lambda: self.store.add_type(name))
+
+    def delete_type(self, name, replacement=None):
+        store = self.store
+        store.require_writable()
+        types = store.list_types()
+        if name == 'Default':
+            raise ValueError('Default cannot be deleted.')
+        if name not in types:
+            raise ValueError('The selected issue type no longer exists.')
+        affected = tuple(record for record in store.list_issues() if record.issue_type == name)
+        if replacement is not None and (replacement == name or replacement not in types):
+            raise ValueError('Select another existing issue type as the replacement.')
+        if affected and replacement is None:
+            raise ValueError('Choose a replacement for issues using this type.')
+
+        def operation():
+            now = self._now()
+            for record in affected:
+                store.put_issue(replace(record, issue_type=replacement, modified_at=now, modified_by=self.author_name))
+            store.remove_type(name)
+
+        return self.mutate(operation)
 
     def commit_session(self, session):
         session.require_current(self)

@@ -203,6 +203,7 @@ class Service:
                         record("z", 2, "Roof", status=Status.RESOLVED),
                         record("a", 2, "Window", "seal missing")]
         self.listeners = []
+        self.types = ["Default", "Coordination"]
 
     @property
     def author_name(self):
@@ -225,7 +226,31 @@ class Service:
         return tuple(self.records)
 
     def list_types(self):
-        return ("Default", "Coordination")
+        return tuple(self.types)
+
+    def create_type(self, name):
+        name = name.strip()
+        if not name or len(name) > 100:
+            raise ValueError("Enter an issue type name of 1 to 100 characters.")
+        if name.casefold() in {value.casefold() for value in self.types}:
+            raise ValueError("This issue type already exists.")
+        self.types.append(name)
+        for callback in tuple(self.listeners):
+            callback()
+        return name
+
+
+    def delete_type(self, name, replacement=None):
+        if name == 'Default':
+            raise ValueError('Default cannot be deleted.')
+        affected = [r for r in self.records if r.issue_type == name]
+        if affected and not replacement:
+            raise ValueError('Choose a replacement for issues using this type.')
+        self.records = [SimpleNamespace(**{**vars(r), 'issue_type': replacement})
+                        if r in affected else r for r in self.records]
+        self.types.remove(name)
+        for callback in tuple(self.listeners):
+            callback()
 
 
 class Session:
@@ -292,6 +317,77 @@ class ACCUITests(unittest.TestCase):
         for search in ("12", "DOOR", "wall"):
             panel.search.set_value(search)
             self.assertEqual([r.id for r in panel.filtered_records()], ["b"])
+
+    def test_manage_types_opens_one_window_and_creation_refreshes_choices(self):
+        panel = self.list_panel()
+        status = next(w for w in Widget.widgets if isinstance(w, Combo) and 'All statuses' in w.args)
+        types = next(w for w in Widget.widgets if isinstance(w, Combo) and 'All types' in w.args)
+        self.assertIs(status.parent, types.parent)
+        self.assertEqual(types.parent.kind, 'VStack')
+        self.click('Manage types')
+        manager = panel._type_manager
+        self.click('Manage types')
+        self.assertIs(panel._type_manager, manager)
+        manager.type_name.set_value(' Safety ')
+        self.click('Create')
+        self.assertIn('Safety', self.service.list_types())
+        self.assertEqual(manager.selected_type, 'Safety')
+        types = next(w for w in reversed(Widget.widgets) if isinstance(w, Combo) and 'All types' in w.args)
+        self.assertIn('Safety', types.args)
+        self.assertEqual(panel.type_filter, 'All types')
+        self.assertEqual(manager.type_name.as_string, '')
+
+    def test_manage_types_validates_names_and_closes_on_stage_change(self):
+        panel = self.list_panel()
+        self.click('Manage types')
+        manager = panel._type_manager
+        self.click('Create')
+        self.assertIn('1 to 100', manager._error)
+        manager.type_name.set_value('coordination')
+        self.click('Create')
+        self.assertEqual(manager._error, 'This issue type already exists.')
+        self.service.stage = object()
+        panel.refresh()
+        self.assertTrue(manager._destroyed)
+        self.assertIsNone(panel._type_manager)
+        self.assertEqual(self.service.listeners, [panel.refresh])
+
+    def test_manage_types_protects_default_and_requires_explicit_replacement(self):
+        panel = self.list_panel()
+        panel.type_filter = 'Coordination'
+        self.click('Manage types')
+        manager = panel._type_manager
+        self.assertFalse(self.click('Delete type').enabled)
+        self.click('Coordination (1 issue)')
+        self.assertFalse(self.click('Delete type').enabled)
+        combo = next(w for w in reversed(Widget.widgets) if isinstance(w, Combo) and 'Choose replacement' in w.args)
+        combo.model.choose(1)
+        self.assertTrue(self.click('Delete type').enabled)
+        self.assertNotIn('Coordination', self.service.list_types())
+        self.assertEqual(self.service.records[0].issue_type, 'Default')
+        self.assertEqual(panel.type_filter, 'All types')
+        manager.type_name.set_value('Safety')
+        self.click('Create')
+        self.assertTrue(self.click('Delete type').enabled)
+        self.assertNotIn('Safety', self.service.list_types())
+
+    def test_manage_types_disabled_without_stage_and_retained_callbacks_are_safe(self):
+        panel = self.list_panel()
+        self.service.stage = None
+        panel.refresh()
+        self.assertFalse(self.click('Manage types').enabled)
+        self.assertIsNone(panel._type_manager)
+        self.service.stage = object()
+        panel.refresh()
+        self.click('Manage types')
+        manager = panel._type_manager
+        manager.type_name.set_value('Safety')
+        callback = next(w.clicked_fn for w in reversed(Widget.widgets) if w.args and w.args[0] == 'Create')
+        panel.destroy()
+        callback()
+        self.assertNotIn('Safety', self.service.list_types())
+        self.assertTrue(manager._destroyed)
+        self.assertFalse(self.service.listeners)
 
     def test_status_type_filters_and_stable_number_identity_order(self):
         panel = self.list_panel()

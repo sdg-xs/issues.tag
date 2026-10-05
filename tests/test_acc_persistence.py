@@ -77,6 +77,42 @@ class AccPersistenceTests(unittest.TestCase):
         session.update(title=title, description='Check clearance')
         return session
 
+    def test_delete_type_requires_replacement_and_preserves_issue_fields(self):
+        self.service.create_type('Clash')
+        draft = self.draft('Door')
+        draft.update(issue_type='Clash')
+        issue_id = self.service.commit_session(draft)
+        original = self.service.get_issue(issue_id)
+        before = self.service.stage.GetRootLayer().ExportToString()
+        for name, replacement in (('Default', None), ('Missing', None), ('Clash', None),
+                                  ('Clash', 'Clash'), ('Clash', 'Missing')):
+            with self.subTest(name=name, replacement=replacement):
+                with self.assertRaises(ValueError):
+                    self.service.delete_type(name, replacement)
+                self.assertEqual(self.service.stage.GetRootLayer().ExportToString(), before)
+        self.service.delete_type('Clash', 'Default')
+        updated = self.service.get_issue(issue_id)
+        self.assertEqual(updated.issue_type, 'Default')
+        self.assertEqual(replace(updated, issue_type=original.issue_type,
+                                 modified_at=original.modified_at, modified_by=original.modified_by), original)
+        self.assertEqual(self.service.list_types(), ('Default',))
+        reopened = self.sdk.store.IssueStore(Usd.Stage.Open(self.service.stage.GetRootLayer()))
+        self.assertEqual(reopened.get_issue(issue_id), updated)
+
+    def test_delete_unused_type_is_undoable_and_read_only_is_unchanged(self):
+        self.service.create_type('Safety')
+        command_api = importlib.import_module(self.sdk.package + '.commands')
+        command = command_api.UpdateIssuesCommand(self.service.stage, lambda: self.service.store.remove_type('Safety'))
+        command.do()
+        self.assertNotIn('Safety', self.service.list_types())
+        command.undo()
+        self.assertIn('Safety', self.service.list_types())
+        before = self.service.stage.GetRootLayer().ExportToString()
+        self.service.stage.GetRootLayer().SetPermissionToEdit(False)
+        with self.assertRaises(ValueError):
+            self.service.delete_type('Safety')
+        self.assertEqual(self.service.stage.GetRootLayer().ExportToString(), before)
+
     def test_title_trimmed_boundaries_and_unknown_type_have_no_partial_save(self):
         for title in ('', '   ', 'x' * 256, '  ' + 'x' * 256 + '  '):
             with self.subTest(title_length=len(title)):

@@ -111,14 +111,19 @@ class IssueStore:
         stored = attr.Get() or () if attr else ()
         return tuple(dict.fromkeys(("Default", *stored, *(r.issue_type for r in records))))
 
-    def add_type(self, name):
-        self.require_writable()
+    def validate_new_type(self, name):
         name = name.strip()
         if not name or len(name) > 100:
             raise ValueError("Enter an issue type name of 1 to 100 characters.")
         types = self.list_types()
         if name.casefold() in {t.casefold() for t in types}:
             raise ValueError("This issue type already exists.")
+        return name
+
+    def add_type(self, name):
+        self.require_writable()
+        name = self.validate_new_type(name)
+        types = self.list_types()
         with Usd.EditContext(self.stage, self.stage.GetRootLayer()):
             self._container().CreateAttribute("issues:types", Sdf.ValueTypeNames.StringArray, custom=True).Set((*types, name))
         return name
@@ -135,6 +140,19 @@ class IssueStore:
             self.put_issue(record)
         with Usd.EditContext(self.stage, self.stage.GetRootLayer()):
             self._container()
+
+    def remove_type(self, name):
+        self.require_writable()
+        if name == 'Default':
+            raise ValueError('Default cannot be deleted.')
+        types = self.list_types()
+        if name not in types:
+            raise ValueError('The selected issue type no longer exists.')
+        if any(record.issue_type == name for record in self.list_issues()):
+            raise ValueError('Choose a replacement for issues using this type.')
+        with Usd.EditContext(self.stage, self.stage.GetRootLayer()):
+            self._container().CreateAttribute('issues:types', Sdf.ValueTypeNames.StringArray, custom=True).Set(
+                tuple(value for value in types if value != name))
 
     def next_number(self):
         return max((r.number for r in self.list_issues()), default=0) + 1

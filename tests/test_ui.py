@@ -55,6 +55,47 @@ async def test_panel_placement_cancel_does_not_create_issue(service):
         await close_controller(extension)
 
 
+async def test_panel_manage_types_create_delete_and_undo(service):
+    import omni.kit.undo
+    from issues_tag.window import IssuesWindow
+    from verify_kit import frames
+    panel = IssuesWindow(service, on_select=lambda value: None, on_create=lambda: None)
+    try:
+        panel._manage_types()
+        manager = panel._type_manager
+        await frames(3)
+        assert manager.window.visible
+        manager._create()
+        assert '1 to 100' in manager._error
+        manager.type_name.set_value('Safety')
+        manager._create()
+        await frames(3)
+        assert 'Safety' in panel.types and manager.selected_type == 'Safety'
+        manager.type_name.set_value('safety')
+        manager._create()
+        assert 'already exists' in manager._error
+        issue_id = service.create_issue('Check access', issue_type='Safety')
+        await frames(3)
+        assert manager.counts['Safety'] == 1
+        manager._delete()
+        assert 'replacement' in manager._error
+        assert service.get_issue(issue_id).issue_type == 'Safety'
+        manager.replacement = 'Default'
+        manager._delete()
+        await frames(3)
+        assert 'Safety' not in panel.types
+        assert service.get_issue(issue_id).issue_type == 'Default'
+        omni.kit.undo.undo()
+        await frames(3)
+        assert 'Safety' in panel.types
+        assert service.get_issue(issue_id).issue_type == 'Safety'
+        manager._select('Default')
+        manager._delete()
+        assert 'Default' in service.list_types()
+    finally:
+        panel.destroy()
+
+
 async def test_panel_attachment_validation_ignores_camera_navigation(service):
     from pxr import Sdf, UsdGeom
     from issues_tag.elements import make_anchor, attachment_state
