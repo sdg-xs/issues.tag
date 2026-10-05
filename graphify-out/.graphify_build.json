@@ -1,0 +1,7 @@
+{
+  "gitignore": true,
+  "excludes": [
+    "verification-dependencies/**",
+    "verification/**"
+  ]
+}

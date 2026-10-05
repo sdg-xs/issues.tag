@@ -1,0 +1,23 @@
+{
+  "0": "extension.py",
+  "1": "bcf.py",
+  "2": "Omniverse issue management specification",
+  "3": "IssuesWindow",
+  "4": "ViewportAdapter",
+  "5": "ImportWindow",
+  "6": "IssueService",
+  "7": "IssueStore",
+  "8": "commands.py",
+  "9": "MarkupAdapter",
+  "10": "Issues for Omniverse",
+  "11": "graphify",
+  "12": "Omniverse issue management implementation plan",
+  "13": "Issues panel design",
+  "14": "Issue viewport design",
+  "15": "make_anchor",
+  "16": "Implementation verification record",
+  "17": "Supported BCF file profile",
+  "18": "markup.py",
+  "19": "test_markup.py",
+  "20": "bcf-21-compatibility.md"
+}
