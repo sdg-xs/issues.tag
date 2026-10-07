@@ -5,6 +5,50 @@ import omni.ui as ui
 from .styles import STYLE
 
 
+class ReferenceSelectionWindow:
+    def __init__(self, paths, on_select):
+        self.paths = tuple(paths)
+        self.on_select = on_select
+        self._error = ''
+        self._destroyed = False
+        self.window = ui.Window('BCF reference model', width=680, height=230)
+        self.window.frame.style = STYLE
+        self.window.frame.set_build_fn(self._build)
+        self.window.frame.rebuild()
+
+    def destroy(self):
+        if not self._destroyed:
+            self._destroyed = True
+            self.on_select = None
+            self.window.destroy()
+
+    def _select_clicked(self):
+        if self._destroyed:
+            return
+        index = self._reference_model.get_item_value_model().as_int
+        if not 1 <= index <= len(self.paths):
+            self._error_label.text = 'Choose a reference model before previewing the import.'
+            return
+        try:
+            self.on_select(self.paths[index - 1])
+        except Exception as error:
+            self._error = str(error)
+            self._error_label.text = self._error
+            return
+        self.destroy()
+
+    def _build(self):
+        if self._destroyed:
+            return
+        with ui.VStack(spacing=8, margin=16):
+            ui.Label('Choose the reference model for these BCF viewpoints.', word_wrap=True, height=36)
+            self._reference_model = ui.ComboBox(0, 'Choose reference model', *self.paths, height=30).model
+            self._error_label = ui.Label(self._error, name='error', word_wrap=True, height=44)
+            with ui.HStack(height=32, spacing=8):
+                ui.Button('Cancel', clicked_fn=self.destroy)
+                ui.Button('Preview import', name='primary', clicked_fn=self._select_clicked)
+
+
 class ImportWindow:
     def __init__(self, plan, on_apply, on_cancel=None):
         self.plan = plan
@@ -44,6 +88,8 @@ class ImportWindow:
         self.applied = True
         self._summary = (f"Imported {result.created} new issues and updated {result.updated}."
                          if result is not None else "Import applied.")
+        if result is not None and result.viewpoints_updated:
+            self._summary += f" Remapped {result.viewpoints_updated} existing viewpoints."
         self.window.frame.rebuild()
         return result
 
@@ -69,6 +115,9 @@ class ImportWindow:
                 ui.Label(f"{len(self.plan.document.issues)} issues | {len(self.plan.conflicts)} field conflicts", height=22, name="muted")
                 ui.Label("Review conflicting fields before applying. Existing values are kept unless you choose Use imported.",
                          name="muted", word_wrap=True, height=42)
+                if self.plan.frame_signature:
+                    ui.Label('Existing imported viewpoints are remapped if their reference frame changes.',
+                             name='muted', word_wrap=True, height=36)
                 for warning in self.plan.document.warnings:
                     ui.Label(str(warning), name="muted", word_wrap=True, height=40)
                 if self._error:

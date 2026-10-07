@@ -40,6 +40,7 @@ class ImportPlan:
     stage: object
     expected_records: tuple[IssueRecord, ...]
     frame_signature: tuple = ()
+    reference_path: str | None = None
 
 
 @dataclass(frozen=True)
@@ -48,6 +49,7 @@ class ImportSummary:
     updated: int
     comments_added: int
     viewpoints_added: int
+    viewpoints_updated: int = 0
 
 
 def _guid(value):
@@ -574,11 +576,11 @@ def write_bcf(document, path):
             os.unlink(temporary)
 
 
-def plan_import(document, store):
+def plan_import(document, store, *, reference_path=None):
     _validate_document(document)
     from .bcf_coordinates import import_view, stage_mapping
     needs_mapping = any(v.camera and v.id not in document.native_viewpoints and 'bcf_has_visibility' in v.coordinate_frame and 'bcf_reference_mapping' not in v.coordinate_frame for v in document.viewpoints)
-    mapping = stage_mapping(store.stage) if needs_mapping else ()
+    mapping = stage_mapping(store.stage, reference_path=reference_path) if needs_mapping else ()
     document = replace(document, viewpoints=tuple(v if v.id in document.native_viewpoints else import_view(v, mapping) for v in document.viewpoints))
     existing = store.list_issues()
     topics = {r.bcf_topic_id or r.id: r for r in existing}
@@ -595,12 +597,12 @@ def plan_import(document, store):
             baseline = local.import_baseline.get(field)
             if current != received and (baseline is None or current != baseline and received != baseline):
                 conflicts.append(Conflict(topic_id + ":" + field, topic_id, field, current, received, baseline))
-    return ImportPlan(document, tuple(conflicts), store.stage, existing, mapping)
+    return ImportPlan(document, tuple(conflicts), store.stage, existing, mapping, reference_path)
 
 
 def apply_import(plan, choices, service):
-    from .bcf_coordinates import stage_mapping
-    if plan.frame_signature and stage_mapping(service.stage) != plan.frame_signature:
+    from .bcf_coordinates import export_view, stage_mapping, transform_view
+    if plan.frame_signature and stage_mapping(service.stage, reference_path=plan.reference_path) != plan.frame_signature:
         raise ValueError('The model coordinate frame changed after import preview. Preview the file again.')
     if service.stage is not plan.stage or service.list_issues() != plan.expected_records:
         raise ValueError("The scene changed after import preview. Preview the file again.")
@@ -611,6 +613,7 @@ def apply_import(plan, choices, service):
     conflicts = {c.key: c for c in plan.conflicts}
     views = {v.id: v for v in plan.document.viewpoints}
     records, pending_views = [], []
+    remapped_views = {}
     created = updated = comments_added = 0
     for incoming in plan.document.issues:
         topic_id = incoming.bcf_topic_id or incoming.id
@@ -649,9 +652,22 @@ def apply_import(plan, choices, service):
             if identity not in views:
                 continue
             try:
-                service.store.get_viewpoint(identity)
+                existing_view = service.store.get_viewpoint(identity)
             except KeyError:
                 pending_views.append((record.id, replace(views[identity], markup_path="")))
+            else:
+                old_mapping = existing_view.coordinate_frame.get('bcf_reference_mapping')
+                if (plan.frame_signature and identity not in plan.document.native_viewpoints
+                        and existing_view.camera and old_mapping
+                        and (tuple(old_mapping) != plan.frame_signature[0]
+                             or existing_view.coordinate_frame.get('bcf_reference_prim') != plan.frame_signature[3])):
+                    if existing_view.markup_path:
+                        raise ValueError('An imported viewpoint has editable Markup. Its coordinate frame cannot be changed by BCF reimport.')
+                    values, units, axis, anchor = plan.frame_signature
+                    converted = transform_view(export_view(existing_view), values, units, axis)
+                    converted = replace(converted, coordinate_frame=dict(converted.coordinate_frame,
+                                        bcf_reference_mapping=list(values), bcf_reference_prim=anchor))
+                    remapped_views[identity] = (record.id, converted)
     def operation():
         for record in records:
             if record.number <= 0:
@@ -659,6 +675,8 @@ def apply_import(plan, choices, service):
             service.store.put_issue(record)
         for issue_id, view in pending_views:
             service.store.put_viewpoint(view, issue_id)
-    if created or updated or pending_views:
+        for issue_id, view in remapped_views.values():
+            service.store.put_viewpoint(view, issue_id)
+    if created or updated or pending_views or remapped_views:
         service.mutate(operation)
-    return ImportSummary(created, updated, comments_added, len(pending_views))
+    return ImportSummary(created, updated, comments_added, len(pending_views), len(remapped_views))

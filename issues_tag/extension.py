@@ -515,7 +515,8 @@ class IssuesController:
     def file_dialog(self, export):
         from omni.kit.window.filepicker import FilePickerDialog
         from .bcf import read_bcf, write_bcf, export_document, plan_import, apply_import
-        from .import_window import ImportWindow
+        from .bcf_coordinates import ReferenceSelectionRequired
+        from .import_window import ImportWindow, ReferenceSelectionWindow
         def selected(filename, dirname):
             path = Path(dirname) / filename
             if export:
@@ -523,9 +524,19 @@ class IssuesController:
                     path = path.with_suffix('.bcf')
                 write_bcf(export_document(self._service.store), path)
             else:
-                plan = plan_import(read_bcf(path), self._service.store)
-                preview = ImportWindow(plan, lambda choices: apply_import(plan, choices, self._service))
-                self._dialogs.append(preview)
+                document = read_bcf(path)
+                service = self._service
+                stage, generation = service.stage, service.generation
+                def preview_import(reference_path=None):
+                    if self._shutting_down or self._service is not service or service.stage != stage or service.generation != generation:
+                        raise ValueError('The scene changed. Import the file again.')
+                    plan = plan_import(document, service.store, reference_path=reference_path)
+                    preview = ImportWindow(plan, lambda choices: apply_import(plan, choices, service))
+                    self._dialogs.append(preview)
+                try:
+                    preview_import()
+                except ReferenceSelectionRequired as error:
+                    self._dialogs.append(ReferenceSelectionWindow(error.paths, preview_import))
             dialog.hide()
         dialog = FilePickerDialog('Export BCF' if export else 'Import BCF', apply_button_label='Export' if export else 'Preview',
                                   click_apply_handler=lambda filename, dirname: self._window._call(selected, filename, dirname))

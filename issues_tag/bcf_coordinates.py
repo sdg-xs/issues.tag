@@ -3,20 +3,37 @@ import math
 from dataclasses import replace
 
 
-def stage_mapping(stage):
+class ReferenceSelectionRequired(ValueError):
+    def __init__(self, paths):
+        self.paths = tuple(paths)
+        super().__init__('BCF coordinate mapping found multiple IFCSITE Xforms: '
+                         + ', '.join(self.paths) + '. Select the reference site.')
+
+
+def stage_mapping(stage, *, reference_path=None):
     from pxr import Gf, Usd, UsdGeom
     local_layers = set(stage.GetLayerStack())
     roots = []
+    sites = []
     for prim in stage.Traverse():
         if any(prim.GetPath().HasPrefix(path) for path in ('/Issues', '/Viewport_Markups')):
             continue
+        site_type = prim.GetAttribute('omni:hoops:metadata:TYPE')
+        if prim.IsA(UsdGeom.Xform) and site_type and site_type.Get() == 'IFCSITE':
+            sites.append(prim)
         foreign = [s for s in prim.GetPrimStack() if s.layer not in local_layers]
         if not foreign:
             continue
         parent_foreign = any(s.layer not in local_layers for s in prim.GetParent().GetPrimStack())
         if not parent_foreign:
             roots.append(prim)
-    if len(roots) > 1:
+    if reference_path is not None:
+        sites = [prim for prim in sites if str(prim.GetPath()) == reference_path]
+        if not sites:
+            raise ValueError('The selected reference is no longer an IFCSITE Xform. Import the file again.')
+    elif len(sites) > 1:
+        raise ReferenceSelectionRequired(sorted(str(prim.GetPath()) for prim in sites))
+    if not sites and len(roots) > 1:
         raise ValueError('BCF coordinate mapping needs one model reference; multiple instances are ambiguous.')
     target_units = UsdGeom.GetStageMetersPerUnit(stage)
     target_axis = str(UsdGeom.GetStageUpAxis(stage))
@@ -24,14 +41,20 @@ def stage_mapping(stage):
         raise ValueError('Invalid USD target coordinate frame.')
     delta = Gf.Matrix4d(1)
     source_units, source_axis, anchor = target_units, target_axis, ''
-    if roots:
+    prim = sites[0] if sites else None
+    if prim is None and roots:
         root = roots[0]
         defaults = [p for p in Usd.PrimRange(root) if p.GetName() == 'Default' and p.IsA(UsdGeom.Xformable)]
         defaults = [p for p in defaults if not any(p.GetPath().HasPrefix(other.GetPath()) for other in defaults if other != p)]
         if len(defaults) > 1:
             raise ValueError('BCF coordinate mapping found multiple Default frames; select one model instance.')
         prim = defaults[0] if defaults else root
-        spec = next(s for s in prim.GetPrimStack() if s.layer not in local_layers)
+    if prim is not None:
+        anchor = str(prim.GetPath())
+        spec = next((s for s in prim.GetPrimStack() if s.layer not in local_layers), None)
+    else:
+        spec = None
+    if spec is not None:
         source = Usd.Stage.Open(spec.layer)
         source_prim = source.GetPrimAtPath(spec.path)
         if not source_prim:
@@ -43,7 +66,6 @@ def stage_mapping(stage):
         delta = original.GetInverse() * cache.GetLocalToWorldTransform(prim)
         source_units = UsdGeom.GetStageMetersPerUnit(source)
         source_axis = str(UsdGeom.GetStageUpAxis(source))
-        anchor = str(prim.GetPath())
     basis = Gf.Matrix4d(1)
     if source_axis == 'Y':
         basis = Gf.Matrix4d(1,0,0,0, 0,0,-1,0, 0,1,0,0, 0,0,0,1)
