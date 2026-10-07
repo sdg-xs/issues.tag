@@ -18,6 +18,17 @@ def _copy_exposure(source, destination):
             destination.CreateAttribute(attribute.GetName(), attribute.GetTypeName(), attribute.IsCustom()).Set(attribute.Get())
 
 
+def _restore_target_paths(relationship, targets):
+    editor = relationship.targetPathList
+    editor.ClearEdits()
+    if targets is not None:
+        if targets.isExplicit:
+            editor.explicitItems = targets.explicitItems
+        else:
+            for field in ('addedItems', 'prependedItems', 'appendedItems', 'deletedItems', 'orderedItems'):
+                setattr(editor, field, getattr(targets, field))
+
+
 class ImportCameraPreview:
     def __init__(self, viewport, stage):
         self.viewport = viewport
@@ -26,6 +37,7 @@ class ImportCameraPreview:
         self._previous_camera = None
         self._relationship_path = None
         self._relationship_backup = None
+        self._relationship_fields = None
         self._created_specs = []
 
     def show(self, viewpoint):
@@ -61,11 +73,13 @@ class ImportCameraPreview:
                     self._relationship_path = Sdf.Path(product_path).AppendProperty('camera')
                     self._created_specs = [prefix for prefix in Sdf.Path(product_path).GetPrefixes()
                                            if not session.GetPrimAtPath(prefix)]
-                    if session.GetRelationshipAtPath(self._relationship_path):
-                        self._relationship_backup = Sdf.Layer.CreateAnonymous()
-                        Sdf.CreatePrimInLayer(self._relationship_backup, product_path)
-                        Sdf.CopySpec(session, self._relationship_path, self._relationship_backup, self._relationship_path)
-                    product.CreateRelationship('camera').SetTargets([path])
+                    prior = session.GetRelationshipAtPath(self._relationship_path)
+                    if prior:
+                        self._relationship_backup = {'targetPaths': prior.GetInfo('targetPaths')} if prior.HasInfo('targetPaths') else {}
+                    relationship = product.CreateRelationship('camera')
+                    spec = session.GetRelationshipAtPath(self._relationship_path)
+                    self._relationship_fields = {key: spec.GetInfo(key) for key in spec.ListInfoKeys() if key != 'targetPaths'}
+                    relationship.SetTargets([path])
                 self.viewport.camera_path = path
         except Exception:
             self.close()
@@ -76,6 +90,7 @@ class ImportCameraPreview:
         previous, self._previous_camera = self._previous_camera, None
         relationship, self._relationship_path = self._relationship_path, None
         backup, self._relationship_backup = self._relationship_backup, None
+        fields, self._relationship_fields = self._relationship_fields, None
         created, self._created_specs = self._created_specs, []
         if path is None:
             return
@@ -87,17 +102,20 @@ class ImportCameraPreview:
         owns_relation = relation_spec is not None and relation_spec.GetInfo('targetPaths') == Sdf.PathListOp.CreateExplicit([Sdf.Path(path)])
         try:
             with Usd.EditContext(self.stage, session):
-                if same_stage and owns_product and current == path and previous and self.stage.GetPrimAtPath(previous):
+                if (same_stage and owns_product and (relationship is None or owns_relation)
+                        and current == path and previous and self.stage.GetPrimAtPath(previous)):
                     self.viewport.camera_path = previous
         finally:
             with Usd.EditContext(self.stage, session):
                 if owns_relation:
-                    if backup:
-                        Sdf.CopySpec(backup, relationship, session, relationship)
+                    if backup is not None:
+                        _restore_target_paths(relation_spec, backup.get('targetPaths'))
                         if same_stage and owns_product and current != path and self.stage.GetPrimAtPath(current):
                             self.stage.GetRelationshipAtPath(relationship).SetTargets([current])
                     else:
-                        self.stage.GetPrimAtPath(relationship.GetPrimPath()).RemoveProperty('camera')
+                        _restore_target_paths(relation_spec, None)
+                        if {key: relation_spec.GetInfo(key) for key in relation_spec.ListInfoKeys()} == fields:
+                            self.stage.GetPrimAtPath(relationship.GetPrimPath()).RemoveProperty('camera')
                 self.stage.RemovePrim(path)
                 for prim_path in reversed(created):
                     spec = session.GetPrimAtPath(prim_path)

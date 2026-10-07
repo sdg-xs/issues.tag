@@ -89,7 +89,7 @@ $env:PYTHONPATH = 'verification/python'
 & C:/kit-app-template/_build/windows-x86_64/release/kit/python/python.exe -m unittest discover -s tests -p test_acc_controller.py -v
 ```
 
-The latest focused results are 12 preview checks, seven camera-review checks,
+The latest focused results are 16 preview checks, seven camera-review checks,
 eight import-reference checks and 30 controller checks passing. No broad standalone suite was
 rerun to avoid unrelated known baseline failures.
 
@@ -111,6 +111,21 @@ removes its temporary camera and otherwise empty session specs. Preexisting
 relationship list operations are restored exactly when the preview still owns
 the camera. A newer navigation choice takes precedence over the old camera
 binding; relationship metadata is preserved. Root and model layers are untouched.
+
+Review found two ownership gaps in close: a direct USD target edit could be
+overwritten while the viewport cache still named the preview, and restoring the
+whole relationship could discard new metadata. Close now checks target ownership
+before calling the camera setter and restores only target list edits. New
+documentation and custom data survive, with or without a prior session opinion.
+The four regression tests failed before the fix and pass afterward.
+
+After this close-only change, run-24 repeated the native navigation/session
+restoration case: one pass, zero failures, natural exit 0 and zero error log
+lines. Its four navigation PNGs and logs are in `verification/bcf-camera/run-24/`.
+The preview and after-close images were inspected: all three landmarks move left
+with the independent camera; the red centroid changes from X=0.31367 to 0.24250.
+Source hashes match before and after the run. The three-case acceptance above
+belongs to run-23; only the relevant native case was repeated for this amendment.
 
 The discarded temporary-product approach produced renderer lifecycle errors
 that neither drawable notifications nor context frame-completion fences fixed.

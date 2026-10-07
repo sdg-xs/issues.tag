@@ -193,6 +193,64 @@ class ImportCameraPreviewTests(unittest.TestCase):
         preview.close()
         self.assertEqual(product.GetCameraRel().GetTargets(), [Sdf.Path('/NewOwner')])
 
+    def test_direct_relationship_edit_survives_with_stale_viewport_cache(self):
+        from pxr import Sdf, Usd
+        product = self.native_viewport()
+        self.UsdGeom.Camera.Define(self.stage, '/NewOwner')
+        root = self.stage.GetRootLayer().ExportToString()
+        preview = self.preview()
+        preview.show(self.view)
+        temporary = self.viewport.camera_path
+        with Usd.EditContext(self.stage, self.stage.GetSessionLayer()):
+            product.GetCameraRel().SetTargets(['/NewOwner'])
+        self.assertEqual(self.viewport.camera_path, temporary)
+        preview.close()
+        self.assertEqual(product.GetCameraRel().GetTargets(), [Sdf.Path('/NewOwner')])
+        self.assertEqual(self.viewport.camera_path, temporary)
+        self.assertEqual(self.stage.GetRootLayer().ExportToString(), root)
+        self.assertFalse(self.stage.GetPrimAtPath(temporary))
+
+    def _assert_relationship_metadata_survives(self, prior):
+        from pxr import Sdf, Usd
+        product = self.native_viewport()
+        relationship = product.GetCameraRel()
+        session = self.stage.GetSessionLayer()
+        if prior:
+            with Usd.EditContext(self.stage, session):
+                relationship.SetDocumentation('Prior documentation')
+                if prior == 'targets':
+                    relationship.SetTargets(['/Original'])
+            if prior == 'targets':
+                spec = session.GetRelationshipAtPath(relationship.GetPath())
+                spec.targetPathList.ClearEdits()
+                spec.targetPathList.prependedItems = [Sdf.Path('/Original')]
+                spec.targetPathList.deletedItems = [Sdf.Path('/UnrelatedDeletedCamera')]
+        before = session.GetRelationshipAtPath(relationship.GetPath())
+        prior_targets = before.GetInfo('targetPaths') if before and before.HasInfo('targetPaths') else None
+        root = self.stage.GetRootLayer().ExportToString()
+        preview = self.preview()
+        preview.show(self.view)
+        with Usd.EditContext(self.stage, session):
+            relationship.SetDocumentation('Independent documentation')
+            relationship.SetCustomDataByKey('independent', 'keep')
+        preview.close()
+        self.assertEqual(relationship.GetDocumentation(), 'Independent documentation')
+        self.assertEqual(relationship.GetCustomDataByKey('independent'), 'keep')
+        after = session.GetRelationshipAtPath(relationship.GetPath())
+        self.assertTrue(after)
+        self.assertEqual(after.GetInfo('targetPaths') if after.HasInfo('targetPaths') else None, prior_targets)
+        self.assertEqual(relationship.GetTargets(), [Sdf.Path('/Original')])
+        self.assertEqual(self.stage.GetRootLayer().ExportToString(), root)
+
+    def test_metadata_edit_survives_restoring_prior_target_list_ops(self):
+        self._assert_relationship_metadata_survives('targets')
+
+    def test_metadata_edit_survives_clearing_new_target_opinion_on_existing_relationship(self):
+        self._assert_relationship_metadata_survives('metadata')
+
+    def test_metadata_edit_survives_cleanup_of_new_session_relationship(self):
+        self._assert_relationship_metadata_survives(None)
+
     def test_partial_activation_failure_restores_session_and_root(self):
         self.native_viewport()
         before = self.stage.GetSessionLayer().ExportToString()

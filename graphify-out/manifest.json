@@ -498,15 +498,15 @@
     "semantic_hash": ""
   },
   "issues_tag/import_camera_preview.py": {
-    "mtime": 1791371120.7242315,
-    "seen": 1791371572.8412032,
-    "ast_hash": "97fefd15caf981b918fa0dac4e5f4149",
+    "mtime": 1791372048.8262322,
+    "seen": 1791372438.5451438,
+    "ast_hash": "76b730027634b007597ce8f89f11c42e",
     "semantic_hash": ""
   },
   "tests/test_import_camera_preview.py": {
-    "mtime": 1791371234.9270773,
-    "seen": 1791371572.8412693,
-    "ast_hash": "a60131f28462068420f5ee09f12dcc6d",
+    "mtime": 1791371999.0480616,
+    "seen": 1791372438.5452101,
+    "ast_hash": "737ffd1b00ceff1cd959706ab9b3007f",
     "semantic_hash": ""
   },
   "tests/test_import_camera_review.py": {
@@ -522,9 +522,9 @@
     "semantic_hash": ""
   },
   "docs/bcf-camera-verification-2026-10-07.md": {
-    "mtime": 1791371305.1612332,
-    "seen": 1791371572.8413217,
-    "ast_hash": "94a98a7741d73b44dc61630f68610b1c",
+    "mtime": 1791372432.8518858,
+    "seen": 1791372438.545263,
+    "ast_hash": "b326e6b725bec6e36cb8320bbba4f9df",
     "semantic_hash": ""
   }
 }
