@@ -21,6 +21,7 @@ class BcfDocument:
     viewpoints: tuple[ViewpointRecord, ...]
     warnings: tuple[str, ...] = ()
     native_viewpoints: tuple[str, ...] = ()
+    viewpoint_topics: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -236,8 +237,10 @@ def _read_view(root, snapshot, *, legacy=False, warnings=None):
             return ViewpointRecord(_guid(root.get('Guid')), snapshot=snapshot, coordinate_frame={'meters_per_unit': 1, 'up_axis': 'Z'})
         raise ValueError("BCF viewpoint requires a camera.")
     eye = _vector(camera, "CameraViewPoint")
-    direction = _normalize(_vector(camera, "CameraDirection"))
-    right = _normalize(_cross(direction, _vector(camera, "CameraUpVector")))
+    source_direction = _vector(camera, "CameraDirection")
+    source_up = _vector(camera, "CameraUpVector")
+    direction = _normalize(source_direction)
+    right = _normalize(_cross(direction, source_up))
     up = _cross(right, direction)
     try:
         if legacy and camera.find('AspectRatio') is None:
@@ -274,7 +277,13 @@ def _read_view(root, snapshot, *, legacy=False, warnings=None):
     if visibility_node is not None:
         default = visibility_node.get("DefaultVisibility", "false") in ("true", "1")
         bcf_visibility = [asdict(_component(v)) for v in visibility_node.findall("Exceptions/Component")]
-    return ViewpointRecord(_guid(root.get("Guid")), camera={"projection": "perspective" if perspective else "orthographic", "transform": transform, "horizontal_aperture": vertical*aspect, "vertical_aperture": vertical, "focal_length": focal, "clipping_range": [0.01, 1000000]}, clipping_planes=tuple(clips), visibility=visibility, selection=refs, snapshot=snapshot, coordinate_frame={"meters_per_unit": 1, "up_axis": "Z", "bcf_default_visibility": visibility_node.get("DefaultVisibility", "false") if visibility_node is not None else "true", "bcf_visibility": bcf_visibility, "bcf_has_visibility": visibility_node is not None})
+    source_camera = {
+        "version": "2.1" if legacy else "3.0",
+        "position": list(eye), "direction": list(source_direction), "up": list(source_up),
+        "field_of_view": scale if perspective else None,
+        "view_to_world_scale": None if perspective else scale, "aspect_ratio": aspect,
+    }
+    return ViewpointRecord(_guid(root.get("Guid")), camera={"projection": "perspective" if perspective else "orthographic", "transform": transform, "horizontal_aperture": vertical*aspect, "vertical_aperture": vertical, "focal_length": focal, "clipping_range": [0.01, 1000000]}, clipping_planes=tuple(clips), visibility=visibility, selection=refs, snapshot=snapshot, coordinate_frame={"meters_per_unit": 1, "up_axis": "Z", "bcf_default_visibility": visibility_node.get("DefaultVisibility", "false") if visibility_node is not None else "true", "bcf_visibility": bcf_visibility, "bcf_has_visibility": visibility_node is not None, "bcf_source_camera": source_camera})
 
 
 def read_bcf(path):
@@ -295,7 +304,7 @@ def read_bcf(path):
             raise ValueError("BCF 3.0 requires extensions.xml.")
         if 'extensions.xml' in members:
             _xml(members['extensions.xml'])
-        issues, views, warnings, native_ids = [], [], [], []
+        issues, views, warnings, native_ids, viewpoint_topics = [], [], [], [], []
         for filename, payload in sorted(members.items()):
             if not filename.endswith("/markup.bcf"):
                 continue
@@ -369,7 +378,8 @@ def read_bcf(path):
                 warnings.append('Assignment, due dates, labels, documents, related topics, and BIM snippets are outside the supported import fields.' if legacy else f'Topic {topic_id} contains unsupported optional fields.')
             issues.append(IssueRecord(topic_id, _text(topic, "Description"), status, author, created, _import_date(_text(topic, 'ModifiedDate') or created, legacy, warnings), _text(topic, "ModifiedAuthor") or author, related_elements=related, initial_viewpoint_id=initial, comments=tuple(comments), bcf_topic_id=topic_id, title=title, issue_type=topic.get("TopicType")))
             views.extend(topic_views)
-        document = BcfDocument(tuple(issues), tuple(views), tuple(dict.fromkeys(warnings)), tuple(dict.fromkeys(native_ids)))
+            viewpoint_topics.extend((view.id, topic_id) for view in topic_views)
+        document = BcfDocument(tuple(issues), tuple(views), tuple(dict.fromkeys(warnings)), tuple(dict.fromkeys(native_ids)), tuple(viewpoint_topics))
         _validate_document(document)
         return document
     except (BadZipFile, OSError, RuntimeError) as error:
@@ -550,7 +560,8 @@ def write_bcf(document, path):
                             _sub(comment, "Comment", record.text)
                         if record.viewpoint_id:
                             _sub(comment, "Viewpoint", Guid=_guid(record.viewpoint_id))
-                ids = tuple(dict.fromkeys(v for v in (issue.initial_viewpoint_id, *(c.viewpoint_id for c in issue.comments)) if v))
+                owned = (identity for identity, topic_id in document.viewpoint_topics if topic_id == folder)
+                ids = tuple(dict.fromkeys(v for v in (issue.initial_viewpoint_id, *(c.viewpoint_id for c in issue.comments), *owned) if v))
                 native_views = {}
                 if ids:
                     entries = _sub(topic, "Viewpoints")
