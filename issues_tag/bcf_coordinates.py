@@ -1,6 +1,21 @@
 """Map standard BCF world coordinates through a composed USD reference."""
 import math
-from dataclasses import replace
+from dataclasses import dataclass, replace
+
+
+@dataclass(frozen=True)
+class ViewpointImportOptions:
+    reference_path: str | None = None
+    coordinate_mode: str = 'source_world'
+    fov_mode: str = 'file'
+
+    def __post_init__(self):
+        if self.coordinate_mode not in ('source_world', 'reference_local'):
+            raise ValueError('Unknown BCF coordinate mode.')
+        if self.fov_mode not in ('file', 'horizontal'):
+            raise ValueError('Unknown BCF FOV mode.')
+        if self.reference_path is not None and (not isinstance(self.reference_path, str) or not self.reference_path.startswith('/')):
+            raise ValueError('Invalid BCF reference path.')
 
 
 class ReferenceSelectionRequired(ValueError):
@@ -10,7 +25,8 @@ class ReferenceSelectionRequired(ValueError):
                          + ', '.join(self.paths) + '. Select the reference site.')
 
 
-def stage_mapping(stage, *, reference_path=None):
+def stage_mapping(stage, *, reference_path=None, coordinate_mode='source_world'):
+    ViewpointImportOptions(reference_path=reference_path, coordinate_mode=coordinate_mode)
     from pxr import Gf, Usd, UsdGeom
     local_layers = set(stage.GetLayerStack())
     roots = []
@@ -66,6 +82,10 @@ def stage_mapping(stage, *, reference_path=None):
         delta = original.GetInverse() * cache.GetLocalToWorldTransform(prim)
         source_units = UsdGeom.GetStageMetersPerUnit(source)
         source_axis = str(UsdGeom.GetStageUpAxis(source))
+    if coordinate_mode == 'reference_local':
+        if prim is None:
+            raise ValueError('Reference-local BCF coordinates require a model reference frame.')
+        delta = UsdGeom.XformCache().GetLocalToWorldTransform(prim)
     basis = Gf.Matrix4d(1)
     if source_axis == 'Y':
         basis = Gf.Matrix4d(1,0,0,0, 0,0,-1,0, 0,1,0,0, 0,0,0,1)
@@ -127,13 +147,49 @@ def transform_view(view, values, units, axis, *, inverse=False):
     return replace(view, camera=camera, clipping_planes=tuple(clips), coordinate_frame=frame)
 
 
-def import_view(view, mapping):
+def source_view(view):
+    """Rebuild the standard projection and pose from retained archive values."""
+    original = export_view(view)
+    source = view.coordinate_frame.get('bcf_source_camera')
+    if not source:
+        return original
+    from .bcf import _cross, _normalize
+    direction = _normalize(source['direction'])
+    right = _normalize(_cross(direction, source['up']))
+    up = _cross(right, direction)
+    perspective = source['field_of_view'] is not None
+    vertical = 24.0 if perspective else source['view_to_world_scale'] * 10
+    focal = vertical / (2 * math.tan(math.radians(source['field_of_view']) / 2)) if perspective else 50
+    camera = dict(original.camera, projection='perspective' if perspective else 'orthographic',
+                  transform=[*right, 0, *up, 0, *(-v for v in direction), 0, *source['position'], 1],
+                  horizontal_aperture=vertical * source['aspect_ratio'], vertical_aperture=vertical,
+                  focal_length=focal, clipping_range=[.01, 1000000])
+    frame = {key: value for key, value in original.coordinate_frame.items()
+             if key not in ('bcf_reference_mapping', 'bcf_reference_prim', 'bcf_coordinate_mode', 'bcf_fov_mode', 'bcf_source_clipping_planes')}
+    clips = view.coordinate_frame.get('bcf_source_clipping_planes', original.clipping_planes)
+    return replace(original, camera=camera, coordinate_frame=frame, clipping_planes=tuple(tuple(plane) for plane in clips))
+
+
+def import_view(view, mapping, *, options=None):
     # Native Omniverse records already carry their USD world frame.
-    if not view.camera or 'bcf_has_visibility' not in view.coordinate_frame or 'bcf_reference_mapping' in view.coordinate_frame:
+    if not view.camera or 'bcf_has_visibility' not in view.coordinate_frame or options is None and 'bcf_reference_mapping' in view.coordinate_frame:
         return view
+    if options is not None:
+        view = source_view(view)
+        if options.fov_mode == 'horizontal':
+            source = view.coordinate_frame.get('bcf_source_camera', {})
+            if source.get('version') != '2.1' or view.camera.get('projection') != 'perspective':
+                raise ValueError('BCF horizontal FOV requires a standard 2.1 perspective camera.')
+            camera = dict(view.camera)
+            camera['focal_length'] = camera['horizontal_aperture'] / (2 * math.tan(math.radians(source['field_of_view']) / 2))
+            view = replace(view, camera=camera)
     values, units, axis, anchor = mapping
     converted = transform_view(view, values, units, axis)
-    return replace(converted, coordinate_frame=dict(converted.coordinate_frame, bcf_reference_mapping=list(values), bcf_reference_prim=anchor))
+    frame = dict(converted.coordinate_frame, bcf_reference_mapping=list(values), bcf_reference_prim=anchor)
+    if options is not None:
+        frame.update(bcf_coordinate_mode=options.coordinate_mode, bcf_fov_mode=options.fov_mode)
+        frame['bcf_source_clipping_planes'] = [list(plane) for plane in view.clipping_planes]
+    return replace(converted, coordinate_frame=frame)
 
 
 def export_view(view):

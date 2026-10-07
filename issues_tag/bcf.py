@@ -42,6 +42,9 @@ class ImportPlan:
     expected_records: tuple[IssueRecord, ...]
     frame_signature: tuple = ()
     reference_path: str | None = None
+    source_document: BcfDocument | None = None
+    viewpoint_frame_signatures: tuple = ()
+    viewpoint_options_signatures: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -388,7 +391,9 @@ def read_bcf(path):
 
 def export_document(store):
     records = store.list_issues()
-    view_ids = dict.fromkeys(v for r in records for v in (r.initial_viewpoint_id, *(c.viewpoint_id for c in r.comments)) if v)
+    ownership = tuple((view.id, record.bcf_topic_id or record.id) for record in records for view in store.list_viewpoints(record.id))
+    linked = (v for r in records for v in (r.initial_viewpoint_id, *(c.viewpoint_id for c in r.comments)) if v)
+    view_ids = dict.fromkeys((*linked, *(identity for identity, topic in ownership)))
     views = []
     from .elements import reference_for_prim
     for identity in view_ids:
@@ -402,7 +407,7 @@ def export_document(store):
             frame = dict(view.coordinate_frame, bcf_default_visibility="true", bcf_visibility=hidden, bcf_has_visibility=True)
             view = replace(view, coordinate_frame=frame)
         views.append(view)
-    return BcfDocument(records, tuple(views))
+    return BcfDocument(records, tuple(views), viewpoint_topics=ownership)
 
 
 def _validate_document(document):
@@ -435,6 +440,19 @@ def _validate_document(document):
                 raise ValueError("BCF comment needs author.")
         if any(v and v not in views for v in (issue.initial_viewpoint_id, *(c.viewpoint_id for c in issue.comments))):
             raise ValueError("BCF issue references a missing viewpoint.")
+    owned = {}
+    for ownership in document.viewpoint_topics:
+        if not isinstance(ownership, (list, tuple)) or len(ownership) != 2:
+            raise ValueError('Invalid BCF viewpoint ownership.')
+        view, topic = ownership
+        if view not in views or topic not in topics or view in owned:
+            raise ValueError('Invalid BCF viewpoint ownership.')
+        owned[view] = topic
+    for issue in document.issues:
+        topic = issue.bcf_topic_id or issue.id
+        for identity in (issue.initial_viewpoint_id, *(comment.viewpoint_id for comment in issue.comments)):
+            if identity in owned and owned[identity] != topic:
+                raise ValueError('BCF viewpoint ownership disagrees with its topic references.')
 
 
 def _sub(parent, name, value=None, **attrs):
@@ -587,12 +605,53 @@ def write_bcf(document, path):
             os.unlink(temporary)
 
 
-def plan_import(document, store, *, reference_path=None):
+def plan_import(document, store, *, reference_path=None, viewpoint_options=None):
     _validate_document(document)
-    from .bcf_coordinates import import_view, stage_mapping
-    needs_mapping = any(v.camera and v.id not in document.native_viewpoints and 'bcf_has_visibility' in v.coordinate_frame and 'bcf_reference_mapping' not in v.coordinate_frame for v in document.viewpoints)
-    mapping = stage_mapping(store.stage, reference_path=reference_path) if needs_mapping else ()
-    document = replace(document, viewpoints=tuple(v if v.id in document.native_viewpoints else import_view(v, mapping) for v in document.viewpoints))
+    from .bcf_coordinates import ViewpointImportOptions, import_view, source_view, stage_mapping
+    source_document = replace(document, viewpoints=tuple(
+        source_view(view) if view.id not in document.native_viewpoints and view.camera and 'bcf_has_visibility' in view.coordinate_frame else view
+        for view in document.viewpoints))
+    if viewpoint_options is None:
+        viewpoint_options = {}
+    if not isinstance(viewpoint_options, dict) or any(key not in {v.id for v in document.viewpoints} for key in viewpoint_options):
+        raise ValueError('Unknown BCF viewpoint options key.')
+    default_options = ViewpointImportOptions(reference_path=reference_path)
+    converted, frame_signatures, option_signatures = [], [], []
+    mappings = {}
+    for view in document.viewpoints:
+        options = viewpoint_options.get(view.id, default_options)
+        if isinstance(options, dict):
+            if any(key not in ('reference_path', 'coordinate_mode', 'fov_mode') for key in options):
+                raise ValueError('Unknown BCF viewpoint options key.')
+            options = ViewpointImportOptions(**options)
+        if not isinstance(options, ViewpointImportOptions):
+            raise ValueError('Invalid BCF viewpoint options.')
+        explicit_reference = view.id in viewpoint_options and options.reference_path is not None
+        options = replace(options, reference_path=options.reference_path if options.reference_path is not None else reference_path)
+        standard = view.id not in document.native_viewpoints and view.camera and 'bcf_has_visibility' in view.coordinate_frame
+        if options.fov_mode == 'horizontal' and (not standard or view.coordinate_frame.get('bcf_source_camera', {}).get('version') != '2.1' or view.camera.get('projection') != 'perspective'):
+            raise ValueError('BCF horizontal FOV requires a standard 2.1 perspective camera.')
+        if not standard:
+            if view.id in viewpoint_options and (options.coordinate_mode != 'source_world' or explicit_reference):
+                raise ValueError('Native or snapshot-only viewpoints cannot change their BCF reference frame.')
+            converted.append(view)
+            continue
+        preserve_mapping = 'bcf_reference_mapping' in view.coordinate_frame and view.id not in viewpoint_options and reference_path is None
+        if preserve_mapping:
+            anchor = view.coordinate_frame.get('bcf_reference_prim')
+            prim = store.stage.GetPrimAtPath(anchor) if anchor else None
+            marker = prim.GetAttribute('omni:hoops:metadata:TYPE') if prim else None
+            selected = anchor if marker and marker.Get() == 'IFCSITE' else None
+            options = ViewpointImportOptions(selected, view.coordinate_frame.get('bcf_coordinate_mode', 'source_world'), view.coordinate_frame.get('bcf_fov_mode', 'file'))
+        key = options.reference_path, options.coordinate_mode
+        if key not in mappings:
+            mappings[key] = stage_mapping(store.stage, reference_path=key[0], coordinate_mode=key[1])
+        mapping = mappings[key]
+        converted.append(view if preserve_mapping else import_view(view, mapping, options=options))
+        frame_signatures.append((view.id, mapping))
+        option_signatures.append((view.id, options))
+    mapping = mappings.get((reference_path, 'source_world'), next(iter(mappings.values()), ()))
+    document = replace(document, viewpoints=tuple(converted))
     existing = store.list_issues()
     topics = {r.bcf_topic_id or r.id: r for r in existing}
     conflicts = []
@@ -608,15 +667,26 @@ def plan_import(document, store, *, reference_path=None):
             baseline = local.import_baseline.get(field)
             if current != received and (baseline is None or current != baseline and received != baseline):
                 conflicts.append(Conflict(topic_id + ":" + field, topic_id, field, current, received, baseline))
-    return ImportPlan(document, tuple(conflicts), store.stage, existing, mapping, reference_path)
+    return ImportPlan(document, tuple(conflicts), store.stage, existing, mapping, reference_path,
+                      source_document, tuple(frame_signatures), tuple(option_signatures))
 
 
 def apply_import(plan, choices, service):
-    from .bcf_coordinates import export_view, stage_mapping, transform_view
-    if plan.frame_signature and stage_mapping(service.stage, reference_path=plan.reference_path) != plan.frame_signature:
-        raise ValueError('The model coordinate frame changed after import preview. Preview the file again.')
+    from .bcf_coordinates import stage_mapping
     if service.stage is not plan.stage or service.list_issues() != plan.expected_records:
         raise ValueError("The scene changed after import preview. Preview the file again.")
+    if plan.viewpoint_frame_signatures:
+        options = dict(plan.viewpoint_options_signatures)
+        checked = {}
+        for identity, signature in plan.viewpoint_frame_signatures:
+            option = options[identity]
+            key = option.reference_path, option.coordinate_mode
+            if key not in checked:
+                checked[key] = stage_mapping(service.stage, reference_path=key[0], coordinate_mode=key[1])
+            if checked[key] != signature:
+                raise ValueError('The model coordinate frame changed after import preview. Preview the file again.')
+    elif plan.frame_signature and stage_mapping(service.stage, reference_path=plan.reference_path) != plan.frame_signature:
+        raise ValueError('The model coordinate frame changed after import preview. Preview the file again.')
     for conflict in plan.conflicts:
         if choices.get(conflict.key) not in ("keep_local", "use_imported"):
             raise ValueError("Choose Keep local or Use imported for every conflict.")
@@ -659,7 +729,8 @@ def apply_import(plan, choices, service):
             record = replace(incoming, **fields, id=topic_id, bcf_topic_id=topic_id, anchor=None, import_baseline=baseline, number=0)
             created += 1
         records.append(record)
-        for identity in dict.fromkeys(v for v in (record.initial_viewpoint_id, *(c.viewpoint_id for c in record.comments)) if v):
+        owned = (view for view, topic in plan.document.viewpoint_topics if topic == topic_id)
+        for identity in dict.fromkeys(v for v in (record.initial_viewpoint_id, *(c.viewpoint_id for c in record.comments), *owned) if v):
             if identity not in views:
                 continue
             try:
@@ -668,16 +739,17 @@ def apply_import(plan, choices, service):
                 pending_views.append((record.id, replace(views[identity], markup_path="")))
             else:
                 old_mapping = existing_view.coordinate_frame.get('bcf_reference_mapping')
-                if (plan.frame_signature and identity not in plan.document.native_viewpoints
-                        and existing_view.camera and old_mapping
-                        and (tuple(old_mapping) != plan.frame_signature[0]
-                             or existing_view.coordinate_frame.get('bcf_reference_prim') != plan.frame_signature[3])):
+                incoming_view = views[identity]
+                frame_keys = ('bcf_reference_mapping', 'bcf_reference_prim', 'bcf_coordinate_mode', 'bcf_fov_mode', 'meters_per_unit', 'up_axis')
+                defaults = {'bcf_coordinate_mode': 'source_world', 'bcf_fov_mode': 'file'}
+                frame_changed = any(existing_view.coordinate_frame.get(key, defaults.get(key)) != incoming_view.coordinate_frame.get(key, defaults.get(key)) for key in frame_keys)
+                if (incoming_view.coordinate_frame.get('bcf_reference_mapping') and identity not in plan.document.native_viewpoints
+                        and existing_view.camera and (old_mapping or existing_view.markup_path)
+                        and (frame_changed or existing_view.camera != incoming_view.camera or existing_view.clipping_planes != incoming_view.clipping_planes)):
                     if existing_view.markup_path:
                         raise ValueError('An imported viewpoint has editable Markup. Its coordinate frame cannot be changed by BCF reimport.')
-                    values, units, axis, anchor = plan.frame_signature
-                    converted = transform_view(export_view(existing_view), values, units, axis)
-                    converted = replace(converted, coordinate_frame=dict(converted.coordinate_frame,
-                                        bcf_reference_mapping=list(values), bcf_reference_prim=anchor))
+                    converted = replace(existing_view, camera=incoming_view.camera, clipping_planes=incoming_view.clipping_planes,
+                                        coordinate_frame=incoming_view.coordinate_frame)
                     remapped_views[identity] = (record.id, converted)
     def operation():
         for record in records:

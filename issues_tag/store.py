@@ -207,3 +207,16 @@ class IssueStore:
                     if record.id == viewpoint_id:
                         return record
         raise KeyError("The saved viewpoint no longer exists.")
+
+    def list_viewpoints(self, issue_id):
+        self.get_issue(issue_id)
+        parent = self.stage.GetPrimAtPath('/Issues/' + self._safe_name(issue_id, 'Issue_'))
+        records = []
+        for prim in parent.GetChildren():
+            attr = prim.GetAttribute('issues:viewpoint')
+            if prim.GetName().startswith('View_') and attr:
+                try:
+                    records.append(decode_viewpoint(attr.Get()))
+                except (TypeError, ValueError, KeyError) as error:
+                    raise ValueError(f'Viewpoint record {prim.GetPath()} is invalid: {error}') from error
+        return tuple(records)
