@@ -173,6 +173,7 @@ class ViewportAdapter:
                                   ('focal_length', camera.GetFocalLengthAttr()), ('clipping_range', camera.GetClippingRangeAttr())]:
                     attr.Set(Gf.Vec2f(*record.camera[key]) if key == 'clipping_range' else record.camera[key])
                 camera.GetPrim().CreateAttribute('omni:kit:cameraLock', Sdf.ValueTypeNames.Bool).Set(False)
+                camera.GetPrim().CreateAttribute('omni:kit:orthoRotate', Sdf.ValueTypeNames.Bool).Set(True)
             for prim_path, visible in record.visibility:
                 prim = stage.GetPrimAtPath(prim_path)
                 if prim and prim.IsA(UsdGeom.Imageable):

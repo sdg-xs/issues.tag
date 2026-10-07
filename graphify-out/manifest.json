@@ -66,9 +66,9 @@
     "semantic_hash": ""
   },
   "issues_tag/viewport.py": {
-    "mtime": 1791366334.308458,
-    "seen": 1791368079.1414616,
-    "ast_hash": "13b97c05c3f92068c1d6af3a21c589e2",
+    "mtime": 1791375861.866153,
+    "seen": 1791376368.6981957,
+    "ast_hash": "0c47e06a8eb9a68dca96c3fc9bd7bdc1",
     "semantic_hash": ""
   },
   "issues_tag/window.py": {
@@ -294,9 +294,9 @@
     "semantic_hash": ""
   },
   "tests/test_review_camera.py": {
-    "mtime": 1791366334.3299394,
-    "seen": 1791368079.141519,
-    "ast_hash": "98e9051c5c4685697523a296fa650071",
+    "mtime": 1791375843.6111917,
+    "seen": 1791376368.6982305,
+    "ast_hash": "58aeee4713f2276440112ab5c0ae98c9",
     "semantic_hash": ""
   },
   "tests/test_view_recall.py": {
@@ -525,6 +525,18 @@
     "mtime": 1791372432.8518858,
     "seen": 1791372438.545263,
     "ast_hash": "b326e6b725bec6e36cb8320bbba4f9df",
+    "semantic_hash": ""
+  },
+  "tests/test_bcf_orbit.py": {
+    "mtime": 1791376281.6478977,
+    "seen": 1791376368.6982143,
+    "ast_hash": "2c5b3333b8541e69761e3e8828a93b88",
+    "semantic_hash": ""
+  },
+  "docs/bcf-camera-development-record-2026-10-07.md": {
+    "mtime": 1791372746.8166485,
+    "seen": 1791376368.6982484,
+    "ast_hash": "97c5d86e5b076185169bf559b186d8d2",
     "semantic_hash": ""
   }
 }
