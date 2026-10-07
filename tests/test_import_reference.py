@@ -63,7 +63,19 @@ class ImportReferenceTests(unittest.TestCase):
     def test_scene_change_while_selecting_prevents_preview(self):
         self._file_picker_journey(change_scene=True)
 
-    def _file_picker_journey(self, *, change_scene):
+    def test_replan_and_apply_use_current_plan_without_rereading_archive(self):
+        self._file_picker_journey(change_scene=False, review_action='replan')
+
+    def test_scene_change_blocks_all_review_callbacks(self):
+        self._file_picker_journey(change_scene=False, review_action='scene')
+
+    def test_shutdown_restores_preview_without_importing(self):
+        self._file_picker_journey(change_scene=False, review_action='shutdown')
+
+    def test_older_dialog_cannot_close_newer_dialog_preview(self):
+        self._file_picker_journey(change_scene=False, review_action='ownership')
+
+    def _file_picker_journey(self, *, change_scene, review_action=None):
         from test_acc_controller import controller_sdk
         from test_bcf_compat import BcfCompatibilityTests
         from pxr import Sdf, UsdGeom
@@ -85,6 +97,8 @@ class ImportReferenceTests(unittest.TestCase):
                     'omni:hoops:metadata:TYPE', Sdf.ValueTypeNames.String).Set('IFCSITE')
             ui = types.ModuleType('omni.ui')
             ui.__dict__.update(vars(panel_types()[0].__init__.__globals__['ui']))
+            from test_import_camera_review import Provider
+            ui.ByteImageProvider = Provider
             picker_module = types.ModuleType('omni.kit.window.filepicker')
             picker_module.FilePickerDialog = Picker
             package = sdk.service.__class__.__module__.rsplit('.', 1)[0]
@@ -112,8 +126,61 @@ class ImportReferenceTests(unittest.TestCase):
                     preview = sdk.extension._dialogs[2]
                     self.assertEqual(preview.plan.reference_path, '/World/SiteB')
                     self.assertFalse(sdk.service.list_issues())
+                    if review_action:
+                        self.assertTrue(callable(preview.on_replan), 'Controller replan callback is missing')
+                        UsdGeom.Camera.Define(stage, '/BeforePreview')
+                        sdk.viewport.viewport = types.SimpleNamespace(stage=stage, camera_path='/BeforePreview')
+                        if review_action == 'scene':
+                            preview._preview_clicked()
+                            temporary = str(sdk.viewport.viewport.camera_path)
+                            sdk.service.generation += 1
+                            sdk.service._notify()
+                            self.assertFalse(stage.GetPrimAtPath(temporary), 'Stale camera survives scene generation change')
+                            for callback, argument in ((preview.on_replan, {}), (preview.on_preview, preview.plan.document.viewpoints[0]), (preview.on_apply, {})):
+                                with self.assertRaisesRegex(ValueError, 'scene changed'):
+                                    callback(argument)
+                            self.assertFalse(sdk.service.list_issues())
+                            preview.destroy()
+                            return
+                        preview._preview_clicked()
+                        self.assertEqual(preview._error, '')
+                        temporary = str(sdk.viewport.viewport.camera_path)
+                        self.assertNotEqual(temporary, '/BeforePreview')
+                        if review_action == 'shutdown':
+                            sdk.extension.on_shutdown()
+                            self.assertEqual(sdk.viewport.viewport.camera_path, '/BeforePreview')
+                            self.assertFalse(stage.GetPrimAtPath(temporary))
+                            return
+                        if review_action == 'ownership':
+                            sdk.extension.file_dialog(False)
+                            sdk.extension._dialogs[-1].apply(fixture.path.name, str(fixture.path.parent))
+                            selector2 = sdk.extension._dialogs[-1]
+                            selector2._reference_model.choose(1)
+                            selector2._select_clicked()
+                            preview2 = sdk.extension._dialogs[-1]
+                            preview2._preview_clicked()
+                            newer = str(sdk.viewport.viewport.camera_path)
+                            self.assertNotEqual(newer, temporary)
+                            self.assertFalse(stage.GetPrimAtPath(temporary))
+                            preview.destroy()
+                            self.assertEqual(str(sdk.viewport.viewport.camera_path), newer)
+                            preview2.cancel()
+                            self.assertEqual(sdk.viewport.viewport.camera_path, '/BeforePreview')
+                            self.assertFalse(stage.GetPrimAtPath(newer))
+                            return
+                        fixture.path.unlink()
+                        preview._reference_model.choose(1)
+                        preview._coordinate_model.choose(1)
+                        preview._replan_clicked()
+                        self.assertEqual(preview._error, '')
+                        self.assertEqual(sdk.viewport.viewport.camera_path, '/BeforePreview')
+                        self.assertEqual(preview.plan.document.viewpoints[0].coordinate_frame['bcf_reference_prim'], '/World/SiteA')
                     preview.apply_choices()
                     self.assertEqual(len(sdk.service.list_issues()), 1)
+                    if review_action == 'replan':
+                        stored = sdk.service.store.get_viewpoint(preview.plan.document.viewpoints[0].id)
+                        self.assertEqual(stored.coordinate_frame['bcf_coordinate_mode'], 'reference_local')
+                        self.assertEqual(stored.coordinate_frame['bcf_reference_prim'], '/World/SiteA')
                 for dialog in sdk.extension._dialogs:
                     dialog.destroy()
 
