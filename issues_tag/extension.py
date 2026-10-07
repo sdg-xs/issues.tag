@@ -38,6 +38,9 @@ class IssuesController:
         self._window = None
         self._toolbar = None
         self._dialogs = []
+        self._import_camera_preview = None
+        self._import_preview_owner = None
+        self._import_preview_listener = None
         self._tasks = set()
         self._session = self._details = self._annotation = self._edit_task = None
         self._owned_views = {}
@@ -515,7 +518,8 @@ class IssuesController:
     def file_dialog(self, export):
         from omni.kit.window.filepicker import FilePickerDialog
         from .bcf import read_bcf, write_bcf, export_document, plan_import, apply_import
-        from .import_window import ImportWindow
+        from .bcf_coordinates import ReferenceSelectionRequired
+        from .import_window import ImportWindow, ReferenceSelectionWindow
         def selected(filename, dirname):
             path = Path(dirname) / filename
             if export:
@@ -523,14 +527,65 @@ class IssuesController:
                     path = path.with_suffix('.bcf')
                 write_bcf(export_document(self._service.store), path)
             else:
-                plan = plan_import(read_bcf(path), self._service.store)
-                preview = ImportWindow(plan, lambda choices: apply_import(plan, choices, self._service))
-                self._dialogs.append(preview)
+                document = read_bcf(path)
+                service = self._service
+                stage, generation = service.stage, service.generation
+                def check_scene():
+                    if self._shutting_down or self._service is not service or service.stage != stage or service.generation != generation:
+                        raise ValueError('The scene changed. Import the file again.')
+                def preview_import(reference_path=None):
+                    from pxr import UsdGeom
+                    from .import_camera_preview import ImportCameraPreview
+                    check_scene()
+                    plan = plan_import(document, service.store, reference_path=reference_path)
+                    source_document = plan.source_document
+                    owner = object()
+                    def close_camera():
+                        if getattr(self, '_import_preview_owner', None) is owner:
+                            self._close_import_camera_preview()
+                    def replan(options):
+                        check_scene()
+                        return plan_import(source_document, service.store, reference_path=reference_path, viewpoint_options=options)
+                    def show_camera(viewpoint):
+                        check_scene()
+                        self._close_import_camera_preview()
+                        camera = ImportCameraPreview(self._viewport.viewport, stage)
+                        camera.show(viewpoint)
+                        self._import_camera_preview = camera
+                        self._import_preview_owner = owner
+                        def scene_changed():
+                            if self._service is not service or service.stage != stage or service.generation != generation:
+                                close_camera()
+                        self._import_preview_listener = (service, scene_changed)
+                        service.add_listener(scene_changed)
+                    def apply(choices):
+                        check_scene()
+                        return apply_import(preview.plan, choices, service)
+                    paths = sorted(str(prim.GetPath()) for prim in stage.Traverse()
+                        if prim.IsA(UsdGeom.Xform) and prim.GetAttribute('omni:hoops:metadata:TYPE').Get() == 'IFCSITE'
+                        and not any(prim.GetPath().HasPrefix(path) for path in ('/Issues', '/Viewport_Markups')))
+                    preview = ImportWindow(plan, apply, on_replan=replan, on_preview=show_camera,
+                        on_close_preview=close_camera, reference_paths=paths)
+                    self._dialogs.append(preview)
+                try:
+                    preview_import()
+                except ReferenceSelectionRequired as error:
+                    self._dialogs.append(ReferenceSelectionWindow(error.paths, preview_import))
             dialog.hide()
         dialog = FilePickerDialog('Export BCF' if export else 'Import BCF', apply_button_label='Export' if export else 'Preview',
                                   click_apply_handler=lambda filename, dirname: self._window._call(selected, filename, dirname))
         self._dialogs.append(dialog)
         dialog.show()
+
+    def _close_import_camera_preview(self):
+        preview, self._import_camera_preview = getattr(self, '_import_camera_preview', None), None
+        self._import_preview_owner = None
+        listener, self._import_preview_listener = getattr(self, '_import_preview_listener', None), None
+        if listener:
+            service, callback = listener
+            service.remove_listener(callback)
+        if preview:
+            preview.close()
 
     def on_shutdown(self):
         global _service
@@ -579,6 +634,7 @@ class IssuesController:
                 failures.append(error)
         if menus:
             clean(lambda: remove_menu_items(menus, "Window"))
+        clean(self._close_import_camera_preview)
         for resource in (toolbar, details, window, *dialogs, markup, viewport):
             if resource:
                 clean(resource.destroy)

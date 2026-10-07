@@ -252,6 +252,153 @@ class BcfCompatibilityTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'uniform scale'):
             coordinates.stage_mapping(stage)
 
+    def test_ifcsite_frame_maps_camera_with_unrelated_references(self):
+        Usd, UsdGeom, Gf = self.usd()
+        from pxr import Sdf
+        stage, model = self.reference_stage()
+        source = Usd.Stage.Open(str(Path(self.directory.name) / 'model.usda'))
+        site = source.GetPrimAtPath('/Building/Default')
+        site.CreateAttribute('omni:hoops:metadata:TYPE', Sdf.ValueTypeNames.String).Set('IFCSITE')
+        source.GetRootLayer().Save()
+        accessory = Usd.Stage.CreateNew(str(Path(self.directory.name) / 'accessory.usda'))
+        accessory.SetDefaultPrim(UsdGeom.Xform.Define(accessory, '/Accessory').GetPrim())
+        accessory.GetRootLayer().Save()
+        UsdGeom.Xform.Define(stage, '/World/Accessory').GetPrim().GetReferences().AddReference(accessory.GetRootLayer().identifier)
+        coordinates = importlib.import_module('_bcf_compat_product.bcf_coordinates')
+        self.fixture()
+        view = self.api.read_bcf(self.path).viewpoints[0]
+        view.camera['transform'][12:15] = [579400,6633600,180]
+        mapping = coordinates.stage_mapping(stage)
+        self.assertEqual(mapping[3], '/World/Building/Default')
+        converted = coordinates.import_view(view, mapping)
+        for a,b in zip(converted.camera['transform'][12:15], view.camera['transform'][12:15]):
+            self.assertAlmostEqual(a,b,places=7)
+        motion = Gf.Matrix4d().SetRotate(Gf.Rotation(Gf.Vec3d(0,0,1), 90))
+        motion.SetTranslateOnly(Gf.Vec3d(20,30,40))
+        model.AddTransformOp().Set(motion)
+        converted = coordinates.import_view(view, coordinates.stage_mapping(stage))
+        expected = motion.Transform(Gf.Vec3d(*view.camera['transform'][12:15]))
+        for a,b in zip(converted.camera['transform'][12:15], expected):
+            self.assertAlmostEqual(a,b,places=7)
+        for a,b in zip(coordinates.export_view(converted).camera['transform'], view.camera['transform']):
+            self.assertAlmostEqual(a,b,places=7)
+
+    def test_multiple_ifcsite_frames_report_site_paths(self):
+        Usd, UsdGeom, Gf = self.usd()
+        from pxr import Sdf
+        stage = Usd.Stage.CreateInMemory()
+        for path in ('/World/SiteA', '/World/SiteB'):
+            UsdGeom.Xform.Define(stage, path).GetPrim().CreateAttribute(
+                'omni:hoops:metadata:TYPE', Sdf.ValueTypeNames.String).Set('IFCSITE')
+        coordinates = importlib.import_module('_bcf_compat_product.bcf_coordinates')
+        with self.assertRaisesRegex(ValueError, 'multiple IFCSITE.*SiteA.*SiteB'):
+            coordinates.stage_mapping(stage)
+
+    def test_local_ifcsite_uses_stage_world_frame(self):
+        Usd, UsdGeom, Gf = self.usd()
+        from pxr import Sdf
+        stage = Usd.Stage.CreateInMemory()
+        UsdGeom.SetStageMetersPerUnit(stage, 1)
+        UsdGeom.SetStageUpAxis(stage, 'Z')
+        site = UsdGeom.Xform.Define(stage, '/World/Site')
+        site.GetPrim().CreateAttribute('omni:hoops:metadata:TYPE', Sdf.ValueTypeNames.String).Set('IFCSITE')
+        site.AddTranslateOp().Set((579347,6633555,178))
+        coordinates = importlib.import_module('_bcf_compat_product.bcf_coordinates')
+        mapping = coordinates.stage_mapping(stage)
+        self.assertEqual(mapping[3], '/World/Site')
+        self.assertEqual(Gf.Matrix4d(*mapping[0]), Gf.Matrix4d(1))
+
+    def test_selected_ifcsite_maps_only_its_instance_and_checks_preview(self):
+        Usd, UsdGeom, Gf = self.usd()
+        from pxr import Sdf
+        stage, model = self.reference_stage()
+        source_path = str(Path(self.directory.name) / 'model.usda')
+        source = Usd.Stage.Open(source_path)
+        source.GetPrimAtPath('/Building/Default').CreateAttribute(
+            'omni:hoops:metadata:TYPE', Sdf.ValueTypeNames.String).Set('IFCSITE')
+        source.GetRootLayer().Save()
+        other = UsdGeom.Xform.Define(stage, '/World/Other')
+        other.GetPrim().GetReferences().AddReference(source_path)
+        other.AddTranslateOp().Set((10,20,30))
+        store_api = importlib.import_module('_bcf_compat_product.store')
+        coordinates = importlib.import_module('_bcf_compat_product.bcf_coordinates')
+        store = store_api.IssueStore(stage)
+        self.fixture()
+        document = self.api.read_bcf(self.path)
+        with self.assertRaises(coordinates.ReferenceSelectionRequired) as raised:
+            self.api.plan_import(document, store)
+        self.assertEqual(set(raised.exception.paths), {'/World/Building/Default', '/World/Other/Default'})
+        plan = self.api.plan_import(document, store, reference_path='/World/Other/Default')
+        for actual, expected in zip(plan.document.viewpoints[0].camera['transform'][12:15], (11,22,33)):
+            self.assertAlmostEqual(actual, expected, places=7)
+        self.assertFalse(store.list_issues())
+        service = types.SimpleNamespace(stage=stage, store=store, list_issues=store.list_issues,
+                                        mutate=lambda operation: operation())
+        other.GetOrderedXformOps()[0].Set((20,20,30))
+        with self.assertRaisesRegex(ValueError, 'coordinate frame changed'):
+            self.api.apply_import(plan, {}, service)
+        self.assertFalse(store.list_issues())
+        plan = self.api.plan_import(document, store, reference_path='/World/Other/Default')
+        self.assertEqual(self.api.apply_import(plan, {}, service).created, 1)
+        for actual, expected in zip(store.get_viewpoint(document.viewpoints[0].id).camera['transform'][12:15], (21,22,33)):
+            self.assertAlmostEqual(actual, expected, places=7)
+
+    def test_selected_reference_must_still_be_an_ifcsite(self):
+        Usd, UsdGeom, Gf = self.usd()
+        from pxr import Sdf
+        stage = Usd.Stage.CreateInMemory()
+        site = UsdGeom.Xform.Define(stage, '/World/Site').GetPrim()
+        marker = site.CreateAttribute('omni:hoops:metadata:TYPE', Sdf.ValueTypeNames.String)
+        marker.Set('IFCSITE')
+        coordinates = importlib.import_module('_bcf_compat_product.bcf_coordinates')
+        with self.assertRaisesRegex(ValueError, 'selected.*IFCSITE'):
+            coordinates.stage_mapping(stage, reference_path='/World/Missing')
+        marker.Set('IFCBUILDING')
+        with self.assertRaisesRegex(ValueError, 'selected.*IFCSITE'):
+            coordinates.stage_mapping(stage, reference_path='/World/Site')
+
+    def test_reimport_remaps_existing_view_without_duplicating_or_replacing_evidence(self):
+        Usd, UsdGeom, Gf = self.usd()
+        from pxr import Sdf
+        from dataclasses import replace
+        stage, model = self.reference_stage()
+        source_path = str(Path(self.directory.name) / 'model.usda')
+        source = Usd.Stage.Open(source_path)
+        source.GetPrimAtPath('/Building/Default').CreateAttribute(
+            'omni:hoops:metadata:TYPE', Sdf.ValueTypeNames.String).Set('IFCSITE')
+        source.GetRootLayer().Save()
+        other = UsdGeom.Xform.Define(stage, '/World/Other')
+        other.GetPrim().GetReferences().AddReference(source_path)
+        other.AddTranslateOp().Set((10,20,30))
+        store_api = importlib.import_module('_bcf_compat_product.store')
+        store = store_api.IssueStore(stage)
+        service = types.SimpleNamespace(stage=stage, store=store, list_issues=store.list_issues,
+                                        mutate=lambda operation: operation())
+        self.fixture()
+        document = self.api.read_bcf(self.path)
+        self.api.apply_import(self.api.plan_import(document, store, reference_path='/World/Building/Default'), {}, service)
+        view_id = document.viewpoints[0].id
+        issue_id = store.list_issues()[0].id
+        original_issue = store.get_issue(issue_id)
+        existing = store.get_viewpoint(view_id)
+        # Local snapshot edits must survive a coordinate correction.
+        store.put_viewpoint(replace(existing, snapshot=b'local evidence'), issue_id)
+        plan = self.api.plan_import(document, store, reference_path='/World/Other/Default')
+        summary = self.api.apply_import(plan, {}, service)
+        for actual, expected in zip(store.get_viewpoint(view_id).camera['transform'][12:15], (11,22,33)):
+            self.assertAlmostEqual(actual, expected, places=7)
+        self.assertEqual(store.get_viewpoint(view_id).snapshot, b'local evidence')
+        self.assertEqual(store.get_issue(issue_id), original_issue)
+        self.assertEqual((summary.created, summary.comments_added, summary.viewpoints_added, summary.viewpoints_updated), (0,0,0,1))
+        repeated = self.api.apply_import(self.api.plan_import(document, store, reference_path='/World/Other/Default'), {}, service)
+        self.assertEqual(repeated.viewpoints_updated, 0)
+        self.assertEqual(len(store.list_issues()), 1)
+        stored = store.get_viewpoint(view_id)
+        store.put_viewpoint(replace(stored, markup_path='/Viewport_Markups/LocalEdit'), issue_id)
+        with self.assertRaisesRegex(ValueError, 'editable Markup'):
+            self.api.apply_import(self.api.plan_import(document, store, reference_path='/World/Building/Default'), {}, service)
+        self.assertEqual(store.get_viewpoint(view_id).camera, stored.camera)
+
     def test_saved_sol_scene_and_sample_share_georeferenced_frame(self):
         Usd, UsdGeom, Gf = self.usd()
         scene = Path.home() / 'OneDrive - HEMY AS/Desktop/Omniverse Working Files/PROPERTIES/SOL11-23/SOL11-23.usd'

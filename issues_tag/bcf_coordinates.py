@@ -1,22 +1,55 @@
 """Map standard BCF world coordinates through a composed USD reference."""
 import math
-from dataclasses import replace
+from dataclasses import dataclass, replace
 
 
-def stage_mapping(stage):
+@dataclass(frozen=True)
+class ViewpointImportOptions:
+    reference_path: str | None = None
+    coordinate_mode: str = 'source_world'
+    fov_mode: str = 'file'
+
+    def __post_init__(self):
+        if self.coordinate_mode not in ('source_world', 'reference_local'):
+            raise ValueError('Unknown BCF coordinate mode.')
+        if self.fov_mode not in ('file', 'horizontal'):
+            raise ValueError('Unknown BCF FOV mode.')
+        if self.reference_path is not None and (not isinstance(self.reference_path, str) or not self.reference_path.startswith('/')):
+            raise ValueError('Invalid BCF reference path.')
+
+
+class ReferenceSelectionRequired(ValueError):
+    def __init__(self, paths):
+        self.paths = tuple(paths)
+        super().__init__('BCF coordinate mapping found multiple IFCSITE Xforms: '
+                         + ', '.join(self.paths) + '. Select the reference site.')
+
+
+def stage_mapping(stage, *, reference_path=None, coordinate_mode='source_world'):
+    ViewpointImportOptions(reference_path=reference_path, coordinate_mode=coordinate_mode)
     from pxr import Gf, Usd, UsdGeom
     local_layers = set(stage.GetLayerStack())
     roots = []
+    sites = []
     for prim in stage.Traverse():
         if any(prim.GetPath().HasPrefix(path) for path in ('/Issues', '/Viewport_Markups')):
             continue
+        site_type = prim.GetAttribute('omni:hoops:metadata:TYPE')
+        if prim.IsA(UsdGeom.Xform) and site_type and site_type.Get() == 'IFCSITE':
+            sites.append(prim)
         foreign = [s for s in prim.GetPrimStack() if s.layer not in local_layers]
         if not foreign:
             continue
         parent_foreign = any(s.layer not in local_layers for s in prim.GetParent().GetPrimStack())
         if not parent_foreign:
             roots.append(prim)
-    if len(roots) > 1:
+    if reference_path is not None:
+        sites = [prim for prim in sites if str(prim.GetPath()) == reference_path]
+        if not sites:
+            raise ValueError('The selected reference is no longer an IFCSITE Xform. Import the file again.')
+    elif len(sites) > 1:
+        raise ReferenceSelectionRequired(sorted(str(prim.GetPath()) for prim in sites))
+    if not sites and len(roots) > 1:
         raise ValueError('BCF coordinate mapping needs one model reference; multiple instances are ambiguous.')
     target_units = UsdGeom.GetStageMetersPerUnit(stage)
     target_axis = str(UsdGeom.GetStageUpAxis(stage))
@@ -24,14 +57,20 @@ def stage_mapping(stage):
         raise ValueError('Invalid USD target coordinate frame.')
     delta = Gf.Matrix4d(1)
     source_units, source_axis, anchor = target_units, target_axis, ''
-    if roots:
+    prim = sites[0] if sites else None
+    if prim is None and roots:
         root = roots[0]
         defaults = [p for p in Usd.PrimRange(root) if p.GetName() == 'Default' and p.IsA(UsdGeom.Xformable)]
         defaults = [p for p in defaults if not any(p.GetPath().HasPrefix(other.GetPath()) for other in defaults if other != p)]
         if len(defaults) > 1:
             raise ValueError('BCF coordinate mapping found multiple Default frames; select one model instance.')
         prim = defaults[0] if defaults else root
-        spec = next(s for s in prim.GetPrimStack() if s.layer not in local_layers)
+    if prim is not None:
+        anchor = str(prim.GetPath())
+        spec = next((s for s in prim.GetPrimStack() if s.layer not in local_layers), None)
+    else:
+        spec = None
+    if spec is not None:
         source = Usd.Stage.Open(spec.layer)
         source_prim = source.GetPrimAtPath(spec.path)
         if not source_prim:
@@ -43,7 +82,10 @@ def stage_mapping(stage):
         delta = original.GetInverse() * cache.GetLocalToWorldTransform(prim)
         source_units = UsdGeom.GetStageMetersPerUnit(source)
         source_axis = str(UsdGeom.GetStageUpAxis(source))
-        anchor = str(prim.GetPath())
+    if coordinate_mode == 'reference_local':
+        if prim is None:
+            raise ValueError('Reference-local BCF coordinates require a model reference frame.')
+        delta = UsdGeom.XformCache().GetLocalToWorldTransform(prim)
     basis = Gf.Matrix4d(1)
     if source_axis == 'Y':
         basis = Gf.Matrix4d(1,0,0,0, 0,0,-1,0, 0,1,0,0, 0,0,0,1)
@@ -105,13 +147,49 @@ def transform_view(view, values, units, axis, *, inverse=False):
     return replace(view, camera=camera, clipping_planes=tuple(clips), coordinate_frame=frame)
 
 
-def import_view(view, mapping):
+def source_view(view):
+    """Rebuild the standard projection and pose from retained archive values."""
+    original = export_view(view)
+    source = view.coordinate_frame.get('bcf_source_camera')
+    if not source:
+        return original
+    from .bcf import _cross, _normalize
+    direction = _normalize(source['direction'])
+    right = _normalize(_cross(direction, source['up']))
+    up = _cross(right, direction)
+    perspective = source['field_of_view'] is not None
+    vertical = 24.0 if perspective else source['view_to_world_scale'] * 10
+    focal = vertical / (2 * math.tan(math.radians(source['field_of_view']) / 2)) if perspective else 50
+    camera = dict(original.camera, projection='perspective' if perspective else 'orthographic',
+                  transform=[*right, 0, *up, 0, *(-v for v in direction), 0, *source['position'], 1],
+                  horizontal_aperture=vertical * source['aspect_ratio'], vertical_aperture=vertical,
+                  focal_length=focal, clipping_range=[.01, 1000000])
+    frame = {key: value for key, value in original.coordinate_frame.items()
+             if key not in ('bcf_reference_mapping', 'bcf_reference_prim', 'bcf_coordinate_mode', 'bcf_fov_mode', 'bcf_source_clipping_planes')}
+    clips = view.coordinate_frame.get('bcf_source_clipping_planes', original.clipping_planes)
+    return replace(original, camera=camera, coordinate_frame=frame, clipping_planes=tuple(tuple(plane) for plane in clips))
+
+
+def import_view(view, mapping, *, options=None):
     # Native Omniverse records already carry their USD world frame.
-    if not view.camera or 'bcf_has_visibility' not in view.coordinate_frame or 'bcf_reference_mapping' in view.coordinate_frame:
+    if not view.camera or 'bcf_has_visibility' not in view.coordinate_frame or options is None and 'bcf_reference_mapping' in view.coordinate_frame:
         return view
+    if options is not None:
+        view = source_view(view)
+        if options.fov_mode == 'horizontal':
+            source = view.coordinate_frame.get('bcf_source_camera', {})
+            if source.get('version') != '2.1' or view.camera.get('projection') != 'perspective':
+                raise ValueError('BCF horizontal FOV requires a standard 2.1 perspective camera.')
+            camera = dict(view.camera)
+            camera['focal_length'] = camera['horizontal_aperture'] / (2 * math.tan(math.radians(source['field_of_view']) / 2))
+            view = replace(view, camera=camera)
     values, units, axis, anchor = mapping
     converted = transform_view(view, values, units, axis)
-    return replace(converted, coordinate_frame=dict(converted.coordinate_frame, bcf_reference_mapping=list(values), bcf_reference_prim=anchor))
+    frame = dict(converted.coordinate_frame, bcf_reference_mapping=list(values), bcf_reference_prim=anchor)
+    if options is not None:
+        frame.update(bcf_coordinate_mode=options.coordinate_mode, bcf_fov_mode=options.fov_mode)
+        frame['bcf_source_clipping_planes'] = [list(plane) for plane in view.clipping_planes]
+    return replace(converted, coordinate_frame=frame)
 
 
 def export_view(view):

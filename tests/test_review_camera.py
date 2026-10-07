@@ -88,6 +88,30 @@ class ReviewCameraTests(unittest.TestCase):
             self.assertTrue(viewport.camera_path.startswith('/IssuesReviewCamera_'))
             self.assertEqual(camera.GetFocalLengthAttr().Get(10), 80.)
 
+    def test_imported_orthographic_recall_enables_orbit_in_session_only(self):
+        with lifecycle_sdk() as sdk:
+            stage, camera, viewport, adapter, record, _, _ = self.fixture(sdk)
+            record.camera['projection'] = 'orthographic'
+            camera.GetPrim().CreateAttribute('omni:kit:orthoRotate', Sdf.ValueTypeNames.Bool).Set(False)
+            before = stage.GetRootLayer().ExportToString()
+            adapter.restore(record)
+            self.assertEqual(camera.GetProjectionAttr().Get(), 'orthographic')
+            self.assertIs(camera.GetPrim().GetAttribute('omni:kit:orthoRotate').Get(), True)
+            self.assertEqual(stage.GetRootLayer().ExportToString(), before)
+            self.assertEqual(record.camera['projection'], 'orthographic')
+
+    def test_shared_orthographic_recall_enables_only_the_review_camera(self):
+        with lifecycle_sdk() as sdk:
+            stage, camera, viewport, adapter, record, windows, _ = self.fixture(sdk)
+            record.camera['projection'] = 'orthographic'
+            camera.GetPrim().CreateAttribute('omni:kit:orthoRotate', Sdf.ValueTypeNames.Bool).Set(False)
+            other = SimpleNamespace(viewport_api=SimpleNamespace(stage=stage, camera_path='/OmniverseKit_Persp'))
+            windows.get_viewport_window_instances = lambda name: [SimpleNamespace(viewport_api=viewport), other]
+            adapter.restore(record)
+            review = stage.GetPrimAtPath(viewport.camera_path)
+            self.assertIs(review.GetAttribute('omni:kit:orthoRotate').Get(), True)
+            self.assertIs(camera.GetPrim().GetAttribute('omni:kit:orthoRotate').Get(), False)
+
 
 if __name__ == '__main__':
     unittest.main()
