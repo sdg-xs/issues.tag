@@ -16,6 +16,8 @@ Use ordinary **scene Save** to persist changes. Issue records and embedded PNGs 
 
 **Import BCF** previews changes before applying them. Choose Keep local or Use imported for conflicting descriptions and statuses. Reimporting unchanged topics, comments, and views preserves their identities. **Export BCF** writes the supported BCF 3.0 subset and annotated snapshots. See [the file profile](docs/bcf-profile.md) for mappings and limits.
 
+For each standard imported viewpoint, compare the source snapshot and camera diagnostics. Choose **Source world** or **Relative to reference**, and an optional **Horizontal FOV (BCF 2.1)** interpretation. After a change, select **Recalculate camera**, then **Preview camera** before applying. The temporary preview changes the camera only. Cancel saves no issues. Corrected reimports retain existing topic, comment and viewpoint identities and stored snapshots. See [camera review instructions](docs/bcf-21-compatibility.md#camera-review-and-corrections) and [camera verification](docs/bcf-camera-verification-2026-10-07.md). No ACC origin is inferred automatically.
+
 BCF imports retain unresolved component references and evidence; they do not invent surface pins. External partner interoperability is still pending selection and an actual exchange test. Internal round trips and official XML schema validation are separate verification outcomes.
 
 ## Verification

@@ -90,6 +90,164 @@ class ImportCameraPreviewTests(unittest.TestCase):
         self.assertEqual(self.stage.GetSessionLayer().ExportToString(), before)
         self.assertEqual(self.viewport.camera_path, '/Original')
 
+    def native_viewport(self):
+        from pxr import UsdRender
+        stage = self.stage
+        product = UsdRender.Product.Define(stage, '/Render/OriginalProduct')
+        product.GetCameraRel().SetTargets(['/Original'])
+
+        class NativeViewport:
+            def __init__(self):
+                self.stage = stage
+                self.render_product_path = '/Render/OriginalProduct'
+                self._camera_path = '/Original'
+                self.fail_activation = False
+
+            def set_render_product_path(self, path, **kwargs):
+                self.render_product_path = path
+                self._camera_path = str(UsdRender.Product(self.stage.GetPrimAtPath(path)).GetCameraRel().GetTargets()[0])
+                return True
+
+            @property
+            def camera_path(self):
+                return self._camera_path
+
+            @camera_path.setter
+            def camera_path(self, value):
+                self._camera_path = str(value)
+                UsdRender.Product(self.stage.GetPrimAtPath(self.render_product_path)).GetCameraRel().SetTargets([value])
+                if self.fail_activation and str(value).startswith('/IssuesImportPreview_'):
+                    raise RuntimeError('activation failed')
+
+        self.viewport = NativeViewport()
+        return product
+
+    def test_native_preview_keeps_product_and_restores_exact_session_list_ops(self):
+        from pxr import Sdf, Usd
+        product = self.native_viewport()
+        with Usd.EditContext(self.stage, self.stage.GetSessionLayer()):
+            product.GetCameraRel().SetTargets(['/Original'])
+        spec = self.stage.GetSessionLayer().GetRelationshipAtPath(product.GetCameraRel().GetPath())
+        spec.targetPathList.ClearEdits()
+        spec.targetPathList.prependedItems = [Sdf.Path('/Original')]
+        spec.targetPathList.deletedItems = [Sdf.Path('/Hidden')]
+        before = self.stage.GetSessionLayer().ExportToString()
+        root = self.stage.GetRootLayer().ExportToString()
+        preview = self.preview()
+        preview.show(self.view)
+        self.assertEqual(self.viewport.render_product_path, '/Render/OriginalProduct')
+        self.assertEqual(product.GetCameraRel().GetTargets(), [Sdf.Path(self.viewport.camera_path)])
+        self.assertEqual(self.stage.GetRootLayer().ExportToString(), root)
+        self.assertIsNone(preview.close())
+        preview.close()
+        self.assertEqual(self.stage.GetRootLayer().ExportToString(), root)
+        self.assertEqual(self.stage.GetSessionLayer().ExportToString(), before)
+
+    def test_exposure_schemas_and_values_are_session_only_and_pose_stays_imported(self):
+        from pxr import Sdf
+        self.native_viewport()
+        original = self.stage.GetPrimAtPath('/Original')
+        original.SetMetadata('apiSchemas', Sdf.TokenListOp.CreateExplicit(['OmniRtxCameraExposureAPI_1', 'OmniRtxCameraAutoExposureAPI_1', 'UnrelatedAPI']))
+        original.CreateAttribute('exposure:fStop', Sdf.ValueTypeNames.Float).Set(7)
+        original.CreateAttribute('omni:rtx:autoExposure:enabled', Sdf.ValueTypeNames.Bool).Set(True)
+        original.CreateAttribute('omni:rtx:unrelated', Sdf.ValueTypeNames.Bool).Set(True)
+        self.UsdGeom.Camera(original).GetFocalLengthAttr().Set(17)
+        preview = self.preview()
+        preview.show(self.view)
+        camera = self.UsdGeom.Camera(self.stage.GetPrimAtPath(self.viewport.camera_path))
+        schemas = camera.GetPrim().GetMetadata('apiSchemas')
+        self.assertIsNotNone(schemas)
+        self.assertEqual(schemas.ApplyOperations([]), ['OmniRtxCameraExposureAPI_1', 'OmniRtxCameraAutoExposureAPI_1'])
+        self.assertEqual(camera.GetPrim().GetAttribute('exposure:fStop').Get(), 7)
+        self.assertTrue(camera.GetPrim().GetAttribute('omni:rtx:autoExposure:enabled').Get())
+        self.assertFalse(camera.GetPrim().GetAttribute('omni:rtx:unrelated'))
+        self.assertAlmostEqual(camera.GetFocalLengthAttr().Get(), self.view.camera['focal_length'], places=4)
+        preview.close()
+
+    def test_independent_navigation_is_not_shadowed_by_preview_session_opinion(self):
+        from pxr import Sdf, Usd
+        product = self.native_viewport()
+        self.UsdGeom.Camera.Define(self.stage, '/NewOwner')
+        preview = self.preview()
+        preview.show(self.view)
+        temporary = self.viewport.camera_path
+        with Usd.EditContext(self.stage, self.stage.GetSessionLayer()):
+            product.GetPrim().CreateAttribute('keep', Sdf.ValueTypeNames.Bool).Set(True)
+        self.viewport.camera_path = '/NewOwner'
+        root = self.stage.GetRootLayer().ExportToString()
+        preview.close()
+        self.assertEqual(self.viewport.camera_path, '/NewOwner')
+        self.assertEqual(product.GetCameraRel().GetTargets(), [Sdf.Path('/NewOwner')])
+        self.assertEqual(self.stage.GetRootLayer().ExportToString(), root)
+        self.assertTrue(product.GetPrim().GetAttribute('keep').Get())
+        self.assertFalse(self.stage.GetPrimAtPath(temporary))
+
+    def test_independent_session_relationship_edit_survives_close(self):
+        from pxr import Sdf, Usd
+        product = self.native_viewport()
+        self.UsdGeom.Camera.Define(self.stage, '/NewOwner')
+        preview = self.preview()
+        preview.show(self.view)
+        with Usd.EditContext(self.stage, self.stage.GetSessionLayer()):
+            self.viewport.camera_path = '/NewOwner'
+        preview.close()
+        self.assertEqual(product.GetCameraRel().GetTargets(), [Sdf.Path('/NewOwner')])
+
+    def test_partial_activation_failure_restores_session_and_root(self):
+        self.native_viewport()
+        before = self.stage.GetSessionLayer().ExportToString()
+        root = self.stage.GetRootLayer().ExportToString()
+        self.viewport.fail_activation = True
+        with self.assertRaisesRegex(RuntimeError, 'activation failed'):
+            self.preview().show(self.view)
+        self.assertEqual(self.viewport.camera_path, '/Original')
+        self.assertEqual(self.stage.GetRootLayer().ExportToString(), root)
+        self.assertEqual(self.stage.GetSessionLayer().ExportToString(), before)
+
+    def test_native_replaced_stage_cleans_old_session_without_stale_restore(self):
+        self.native_viewport()
+        before = self.stage.GetSessionLayer().ExportToString()
+        preview = self.preview()
+        preview.show(self.view)
+        replacement = self.fixture.Usd.Stage.CreateInMemory()
+        self.viewport.stage = replacement
+        self.viewport._camera_path = '/NewSceneCamera'
+        preview.close()
+        self.assertEqual(self.viewport.camera_path, '/NewSceneCamera')
+        self.assertEqual(self.stage.GetSessionLayer().ExportToString(), before)
+
+    def test_navigation_overrides_prior_camera_binding_but_keeps_its_metadata(self):
+        from pxr import Sdf, Usd
+        product = self.native_viewport()
+        self.UsdGeom.Camera.Define(self.stage, '/NewOwner')
+        with Usd.EditContext(self.stage, self.stage.GetSessionLayer()):
+            product.GetCameraRel().SetTargets(['/Original'])
+            product.GetCameraRel().SetDocumentation('Keep camera documentation')
+        preview = self.preview()
+        preview.show(self.view)
+        self.viewport.camera_path = '/NewOwner'
+        preview.close()
+        self.assertEqual(product.GetCameraRel().GetTargets(), [Sdf.Path('/NewOwner')])
+        self.assertEqual(product.GetCameraRel().GetDocumentation(), 'Keep camera documentation')
+
+    def test_independently_selected_product_is_preserved(self):
+        from pxr import Sdf, UsdRender
+        product = self.native_viewport()
+        self.UsdGeom.Camera.Define(self.stage, '/NewOwner')
+        other = UsdRender.Product.Define(self.stage, '/Render/OtherProduct')
+        other.GetCameraRel().SetTargets(['/NewOwner'])
+        preview = self.preview()
+        preview.show(self.view)
+        temporary = self.viewport.camera_path
+        self.viewport.set_render_product_path('/Render/OtherProduct')
+        root = self.stage.GetRootLayer().ExportToString()
+        preview.close()
+        self.assertEqual(self.viewport.render_product_path, '/Render/OtherProduct')
+        self.assertEqual(self.viewport.camera_path, '/NewOwner')
+        self.assertEqual(product.GetCameraRel().GetTargets(), [Sdf.Path('/Original')])
+        self.assertEqual(self.stage.GetRootLayer().ExportToString(), root)
+        self.assertFalse(self.stage.GetPrimAtPath(temporary))
+
 
 if __name__ == '__main__':
     unittest.main()

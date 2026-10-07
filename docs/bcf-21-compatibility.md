@@ -21,7 +21,7 @@ their snapshots and comment links without inventing a camera.
 Offline checks against the supplied archive verify 106 issues, 118 comments,
 121 viewpoints, and 108 cameras. Checks cover BCF 3.0 export/readback, import into
 a temporary parent USD, save/reopen, and duplicate-free repeat import.
-No user scene or source archive is edited. Rendered navigation remains unverified.
+No user scene or source archive is edited. These sample checks do not establish rendered ACC alignment; selected synthetic rendering is recorded in [camera verification](bcf-camera-verification-2026-10-07.md).
 
 Standard BCF cameras and clipping planes are converted from metres/Z-up into
 the USD frame at import preview. The importer first uses the unique Xform prim
@@ -65,3 +65,46 @@ file itself is not stored in the repository.
 
 Schema references: [BCF 2.1 markup](https://github.com/buildingSMART/BCF-XML/blob/release_2_1/Schemas/markup.xsd)
 and [BCF 2.1 visualization](https://github.com/buildingSMART/BCF-XML/blob/release_2_1/Schemas/visinfo.xsd).
+
+## Camera review and corrections
+
+Select a viewpoint in **BCF import review** to see its source snapshot, original
+and converted eye position, BCF version, projection, reference and interpretation.
+Original standard BCF camera values remain attached to the imported viewpoint.
+Native Omniverse viewpoints keep their recorded frame.
+
+**Source world** is the compatible default. It converts metres/Z-up and applies
+the original-to-composed reference delta. **Relative to reference** interprets the
+converted camera in the selected reference's composed world frame. Choose the
+reference explicitly when the archive's origin convention requires it. Coordinate
+magnitude alone cannot establish the correct choice.
+
+**File interpretation** retains the existing vertical FOV behavior. An explicit
+**Horizontal FOV (BCF 2.1)** choice is available only for standard 2.1 perspective
+cameras. BCF 3.0 uses vertical FOV. Orthographic scale is not guessed.
+
+After changing any camera option, select **Recalculate camera**, then **Preview
+camera**. Preview and Apply remain disabled until recalculation succeeds. Compare
+the source snapshot with visible model landmarks. The temporary camera preview
+leaves visibility, selection and clipping unchanged, so it does not reproduce
+all BCF evidence state. Cancel removes the camera and saves no issues. Apply
+revalidates the scene and reference mapping before writing to the parent layer.
+The prior camera is restored only while this preview still owns the viewport.
+
+Reimport with corrected options updates existing camera/clipping records without
+duplicating topics, comments or viewpoints or replacing stored snapshots. Native
+editable Markup blocks a camera/frame change. Repeating unchanged options is
+idempotent. No automatic ACC offset is applied.
+
+For a read-only offline report, run:
+
+```powershell
+$env:PYTHONPATH = 'verification/python'
+& C:/kit-app-template/_build/windows-x86_64/release/kit/python/python.exe tools/bcf_camera_report.py 'C:/path/to/issues.bcf'
+```
+
+The report identifies topics/viewpoints and camera choices without descriptions
+or image bytes. See [camera verification](bcf-camera-verification-2026-10-07.md)
+for selected runtime evidence and its limits. The actual affected ACC topic and
+matching model still need to be identified before its snapshot alignment can be
+verified.
